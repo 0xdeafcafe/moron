@@ -14,6 +14,24 @@ func Push(repoDir, remote, branch string, force bool) error {
 	return err
 }
 
+// PushTag pushes a single tag to the given remote.
+func PushTag(repoDir, remote, tag string) error {
+	_, err := Run(RunOpts{
+		Dir:  repoDir,
+		Args: []string{"push", remote, "refs/tags/" + tag},
+	})
+	return err
+}
+
+// DeleteRemoteTag deletes a tag from the given remote.
+func DeleteRemoteTag(repoDir, remote, tag string) error {
+	_, err := Run(RunOpts{
+		Dir:  repoDir,
+		Args: []string{"push", remote, "--delete", "refs/tags/" + tag},
+	})
+	return err
+}
+
 // Fetch fetches from the given remote.
 func Fetch(repoDir, remote string) error {
 	_, err := Run(RunOpts{

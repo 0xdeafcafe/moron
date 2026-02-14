@@ -173,8 +173,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case shared.KeyPush:
 				remote := m.branches.PushRemote()
-				curBranch := m.branches.CurrentBranch()
 				repoDir := m.repoDir
+				if tag := m.branches.SelectedTag(); tag != "" {
+					return m, func() tea.Msg {
+						return shared.ShowDialogMsg{
+							Type:    shared.DialogConfirm,
+							Title:   "Push Tag",
+							Message: fmt.Sprintf("Push tag %s to %s?", tag, remote),
+							OnConfirm: func() tea.Msg {
+								err := git.PushTag(repoDir, remote, tag)
+								return shared.PushResultMsg{Err: err}
+							},
+						}
+					}
+				}
+				curBranch := m.branches.CurrentBranch()
 				return m, func() tea.Msg {
 					return shared.ShowDialogMsg{
 						Type:    shared.DialogConfirm,

@@ -118,6 +118,14 @@ func (m Model) SelectedBranch() string {
 	return ""
 }
 
+// SelectedTag returns the tag name under the cursor, if any.
+func (m Model) SelectedTag() string {
+	if m.cursor < len(m.nodes) && m.nodes[m.cursor].Tag != nil {
+		return m.nodes[m.cursor].Tag.Name
+	}
+	return ""
+}
+
 func (m Model) emitLogRequest() tea.Cmd {
 	branch := m.SelectedBranch()
 	if branch == "" {
@@ -238,14 +246,20 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				if node.Tag != nil {
 					tagName := node.Tag.Name
 					repoDir := m.repoDir
+					remote := m.PushRemote()
 					return m, func() tea.Msg {
 						return shared.ShowDialogMsg{
 							Type:    shared.DialogConfirm,
 							Title:   "Delete Tag",
-							Message: fmt.Sprintf("Delete tag %s?", tagName),
+							Message: fmt.Sprintf("Delete tag %s locally and from %s?", tagName, remote),
 							OnConfirm: func() tea.Msg {
 								err := git.DeleteTag(repoDir, tagName)
-								return shared.DeleteTagResultMsg{Tag: tagName, Err: err}
+								if err != nil {
+									return shared.DeleteTagResultMsg{Tag: tagName, Err: err}
+								}
+								// Best-effort remote deletion — ignore errors (tag may not exist on remote)
+								_ = git.DeleteRemoteTag(repoDir, remote, tagName)
+								return shared.DeleteTagResultMsg{Tag: tagName}
 							},
 						}
 					}
