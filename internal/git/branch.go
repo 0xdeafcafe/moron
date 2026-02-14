@@ -1,0 +1,175 @@
+package git
+
+import (
+	"sort"
+	"strings"
+)
+
+// Branch represents a git branch.
+type Branch struct {
+	Name      string
+	IsCurrent bool
+	IsRemote  bool
+	Upstream  string
+}
+
+// Tag represents a git tag.
+type Tag struct {
+	Name string
+}
+
+// Remote represents a git remote.
+type Remote struct {
+	Name string
+	URL  string
+}
+
+// ListBranches returns all local branches.
+func ListBranches(repoDir string) ([]Branch, error) {
+	result, err := Run(RunOpts{
+		Dir:  repoDir,
+		Args: []string{"branch", "--format=%(HEAD)%(refname:short)\t%(upstream:short)"},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var branches []Branch
+	for _, line := range strings.Split(strings.TrimSpace(result.Stdout), "\n") {
+		if line == "" {
+			continue
+		}
+		isCurrent := strings.HasPrefix(line, "*")
+		line = strings.TrimPrefix(line, "*")
+		line = strings.TrimPrefix(line, " ")
+
+		parts := strings.SplitN(line, "\t", 2)
+		name := parts[0]
+		upstream := ""
+		if len(parts) > 1 {
+			upstream = parts[1]
+		}
+
+		branches = append(branches, Branch{
+			Name:      name,
+			IsCurrent: isCurrent,
+			Upstream:  upstream,
+		})
+	}
+
+	sort.Slice(branches, func(i, j int) bool {
+		return branches[i].Name < branches[j].Name
+	})
+
+	return branches, nil
+}
+
+// ListRemoteBranches returns all remote branches.
+func ListRemoteBranches(repoDir string) ([]Branch, error) {
+	result, err := Run(RunOpts{
+		Dir:  repoDir,
+		Args: []string{"branch", "-r", "--format=%(refname:short)"},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var branches []Branch
+	for _, line := range strings.Split(strings.TrimSpace(result.Stdout), "\n") {
+		if line == "" || strings.HasSuffix(line, "/HEAD") {
+			continue
+		}
+		branches = append(branches, Branch{
+			Name:     line,
+			IsRemote: true,
+		})
+	}
+
+	return branches, nil
+}
+
+// ListTags returns all tags sorted by version.
+func ListTags(repoDir string) ([]Tag, error) {
+	result, err := Run(RunOpts{
+		Dir:  repoDir,
+		Args: []string{"tag", "--sort=-version:refname"},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var tags []Tag
+	for _, line := range strings.Split(strings.TrimSpace(result.Stdout), "\n") {
+		if line == "" {
+			continue
+		}
+		tags = append(tags, Tag{Name: line})
+	}
+
+	return tags, nil
+}
+
+// ListRemotes returns all configured remotes.
+func ListRemotes(repoDir string) ([]Remote, error) {
+	result, err := Run(RunOpts{
+		Dir:  repoDir,
+		Args: []string{"remote", "-v"},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	seen := make(map[string]bool)
+	var remotes []Remote
+	for _, line := range strings.Split(strings.TrimSpace(result.Stdout), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		name := parts[0]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		remotes = append(remotes, Remote{
+			Name: name,
+			URL:  parts[1],
+		})
+	}
+
+	return remotes, nil
+}
+
+// Checkout switches to the given branch.
+func Checkout(repoDir, branch string) error {
+	_, err := Run(RunOpts{
+		Dir:  repoDir,
+		Args: []string{"checkout", branch},
+	})
+	return err
+}
+
+// CreateBranch creates a new branch and checks it out.
+func CreateBranch(repoDir, name string) error {
+	_, err := Run(RunOpts{
+		Dir:  repoDir,
+		Args: []string{"checkout", "-b", name},
+	})
+	return err
+}
+
+// DeleteBranch deletes a local branch.
+func DeleteBranch(repoDir, name string, force bool) error {
+	flag := "-d"
+	if force {
+		flag = "-D"
+	}
+	_, err := Run(RunOpts{
+		Dir:  repoDir,
+		Args: []string{"branch", flag, name},
+	})
+	return err
+}
