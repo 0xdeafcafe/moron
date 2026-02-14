@@ -100,6 +100,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m.selectByPath(prevPath)
 		}
 		m.clampCursor()
+		m.skipSeparator(1) // ensure cursor isn't on section header
 		m.updateSection()
 		// Auto-select first file if we have one
 		return m, m.emitFileSelected()
@@ -362,9 +363,15 @@ func (m *Model) selectByPath(path string) {
 }
 
 func (m *Model) skipSeparator(dir int) {
-	// The separator is at index len(m.staged) when both sections exist
-	if len(m.staged) > 0 && len(m.unstaged) > 0 && m.cursor == len(m.staged) {
+	// The separator is at index len(m.staged) whenever unstaged files exist
+	if len(m.unstaged) > 0 && m.cursor == len(m.staged) {
 		m.cursor += dir
+		total := m.totalItems()
+		if m.cursor < 0 {
+			m.cursor = total - 1
+		} else if m.cursor >= total {
+			m.cursor = 0
+		}
 	}
 }
 
