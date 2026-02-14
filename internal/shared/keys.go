@@ -30,7 +30,9 @@ const (
 	KeyCtrlEnter    = "ctrl+s"
 	KeyNewBranch    = "n"
 	KeyDeleteBranch = "x"
+	KeyFetch        = "f"
 	KeyPull         = "l"
 	KeyIgnore       = "i"
 	KeyAddRemote    = "A"
+	KeyCreateTag    = "t"
 )

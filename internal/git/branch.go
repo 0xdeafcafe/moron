@@ -137,6 +137,22 @@ func ListTags(repoDir string) ([]Tag, error) {
 	return tags, nil
 }
 
+// CreateTag creates a lightweight tag at the given ref (or HEAD if empty).
+func CreateTag(repoDir, name, ref string) error {
+	args := []string{"tag", name}
+	if ref != "" {
+		args = append(args, ref)
+	}
+	_, err := Run(RunOpts{Dir: repoDir, Args: args})
+	return err
+}
+
+// DeleteTag deletes a tag.
+func DeleteTag(repoDir, name string) error {
+	_, err := Run(RunOpts{Dir: repoDir, Args: []string{"tag", "-d", name}})
+	return err
+}
+
 // ListRemotes returns all configured remotes.
 func ListRemotes(repoDir string) ([]Remote, error) {
 	result, err := Run(RunOpts{

@@ -2,6 +2,8 @@ package workingcopy
 
 import (
 	"fmt"
+	"path/filepath"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -34,16 +36,18 @@ type Model struct {
 	commitCursor  int
 	amend         bool
 	typing        bool
-	returnCursor  int  // cursor position to return to on next navigate (-1 = none)
+	returnCursor  int    // cursor position to return to on next navigate (-1 = none)
+	fileView      string // "tree" or "list"
 }
 
-func New() Model { return Model{returnCursor: -1} }
+func New() Model { return Model{returnCursor: -1, fileView: "tree"} }
 
 func (m *Model) SetSize(w, h int)            { m.width = w; m.height = h }
 func (m *Model) SetFocused(f bool)           { m.focused = f; if !f { m.typing = false } }
 func (m *Model) SetRepoDir(dir string)       { m.repoDir = dir }
 func (m *Model) SetCurrentBranch(name string) { m.currentBranch = name }
 func (m Model) IsTyping() bool               { return m.typing }
+func (m *Model) SetFileView(v string)        { m.fileView = v }
 
 // HintKeys returns context-sensitive shortcut hints.
 func (m Model) HintKeys() string {
@@ -89,6 +93,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				m.unstaged = append(m.unstaged, f)
 			}
 		}
+		sort.Slice(m.staged, func(i, j int) bool { return m.staged[i].Path < m.staged[j].Path })
+		sort.Slice(m.unstaged, func(i, j int) bool { return m.unstaged[i].Path < m.unstaged[j].Path })
 		// Try to keep same file selected
 		if prevPath != "" {
 			m.selectByPath(prevPath)
@@ -404,10 +410,21 @@ func (m *Model) ensureFileVisible() {
 func (m Model) cursorToRow() int {
 	row := 0
 	lineIdx := 0
+	isTree := m.fileView == "tree"
 
 	if len(m.staged) > 0 {
 		row++ // staged header
-		for range m.staged {
+		lastDir := ""
+		for _, f := range m.staged {
+			if isTree {
+				dir := filepath.Dir(f.Path)
+				if dir != "." && dir != lastDir {
+					row++ // directory header
+					lastDir = dir
+				} else if dir == "." {
+					lastDir = ""
+				}
+			}
 			if lineIdx == m.cursor {
 				return row
 			}
@@ -419,7 +436,17 @@ func (m Model) cursorToRow() int {
 	if len(m.unstaged) > 0 {
 		row++ // unstaged header
 		lineIdx++ // separator line index
-		for range m.unstaged {
+		lastDir := ""
+		for _, f := range m.unstaged {
+			if isTree {
+				dir := filepath.Dir(f.Path)
+				if dir != "." && dir != lastDir {
+					row++ // directory header
+					lastDir = dir
+				} else if dir == "." {
+					lastDir = ""
+				}
+			}
 			if lineIdx == m.cursor {
 				return row
 			}
@@ -565,22 +592,17 @@ func (m Model) View() string {
 	fixedLines = append(fixedLines, commitBox)
 	fixedLines = append(fixedLines, "")
 
-	// Build all file list rows (logical list)
-	type fileRow struct {
-		text      string
-		isHeader  bool
-		lineIdx   int // -1 for headers/separators
-	}
+	// Build file rows (tree or list view)
 	var rows []fileRow
 	lineIdx := 0
 
 	if len(m.staged) > 0 {
 		stagedHeader := fmt.Sprintf("  Staged (%d)", len(m.staged))
 		rows = append(rows, fileRow{text: shared.StatusStagedStyle.Render(stagedHeader), isHeader: true, lineIdx: -1})
-		for _, f := range m.staged {
-			label := shared.StatusStagedStyle.Render(f.Staged) + " " + truncatePath(f.Path, innerW-4)
-			rows = append(rows, fileRow{text: "  " + label, lineIdx: lineIdx})
-			lineIdx++
+		if m.fileView == "tree" {
+			rows = append(rows, buildTreeRows(m.staged, shared.StatusStagedStyle, func(f git.FileStatus) string { return shared.StatusStagedStyle.Render(f.Staged) }, innerW, &lineIdx)...)
+		} else {
+			rows = append(rows, buildListRows(m.staged, func(f git.FileStatus) string { return shared.StatusStagedStyle.Render(f.Staged) }, innerW, &lineIdx)...)
 		}
 	}
 
@@ -588,14 +610,16 @@ func (m Model) View() string {
 		unstagedHeader := fmt.Sprintf("  Unstaged (%d)", len(m.unstaged))
 		rows = append(rows, fileRow{text: shared.StatusUnstagedStyle.Render(unstagedHeader), isHeader: true, lineIdx: lineIdx})
 		lineIdx++ // separator counts as a line index
-		for _, f := range m.unstaged {
-			statusStyle := shared.StatusUnstagedStyle
+		statusFn := func(f git.FileStatus) string {
 			if f.Unstaged == "?" {
-				statusStyle = shared.StatusUntrackedStyle
+				return shared.StatusUntrackedStyle.Render("?")
 			}
-			label := statusStyle.Render(f.Unstaged) + " " + truncatePath(f.Path, innerW-4)
-			rows = append(rows, fileRow{text: "  " + label, lineIdx: lineIdx})
-			lineIdx++
+			return shared.StatusUnstagedStyle.Render(f.Unstaged)
+		}
+		if m.fileView == "tree" {
+			rows = append(rows, buildTreeRows(m.unstaged, shared.StatusUnstagedStyle, statusFn, innerW, &lineIdx)...)
+		} else {
+			rows = append(rows, buildListRows(m.unstaged, statusFn, innerW, &lineIdx)...)
 		}
 	}
 
@@ -641,12 +665,62 @@ func (m Model) View() string {
 	return style.Width(innerW).Height(innerH).Render(title + "\n" + content)
 }
 
-func truncatePath(path string, maxWidth int) string {
-	if maxWidth < 4 {
-		maxWidth = 4
+type fileRow struct {
+	text     string
+	isHeader bool
+	lineIdx  int // -1 for headers/dir groups
+}
+
+// buildListRows produces flat file rows (no grouping).
+func buildListRows(files []git.FileStatus, statusFn func(git.FileStatus) string, innerW int, lineIdx *int) []fileRow {
+	var rows []fileRow
+	for _, f := range files {
+		status := statusFn(f)
+		path := f.Path
+		maxW := innerW - 6
+		if maxW < 4 {
+			maxW = 4
+		}
+		if len(path) > maxW {
+			path = "…" + path[len(path)-maxW+1:]
+		}
+		label := status + " " + path
+		rows = append(rows, fileRow{text: "  " + label, lineIdx: *lineIdx})
+		*lineIdx++
 	}
-	if len(path) <= maxWidth {
-		return path
+	return rows
+}
+
+// buildTreeRows groups files by directory and produces indented tree rows.
+func buildTreeRows(files []git.FileStatus, defaultStyle lipgloss.Style, statusFn func(git.FileStatus) string, innerW int, lineIdx *int) []fileRow {
+	var rows []fileRow
+	lastDir := ""
+
+	for _, f := range files {
+		dir := filepath.Dir(f.Path)
+		name := filepath.Base(f.Path)
+
+		if dir != "." && dir != lastDir {
+			// New directory group
+			dirLabel := shared.HelpDescStyle.Render("  " + dir + "/")
+			rows = append(rows, fileRow{text: dirLabel, isHeader: true, lineIdx: -1})
+			lastDir = dir
+		} else if dir == "." {
+			lastDir = ""
+		}
+
+		indent := "  "
+		if dir != "." {
+			indent = "    "
+		} else {
+			name = f.Path
+		}
+
+		status := statusFn(f)
+		label := status + " " + name
+		rows = append(rows, fileRow{text: indent + label, lineIdx: *lineIdx})
+		*lineIdx++
 	}
-	return "..." + path[len(path)-maxWidth+3:]
+
+	return rows
 }

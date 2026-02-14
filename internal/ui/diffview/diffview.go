@@ -3,12 +3,21 @@ package diffview
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/0xdeafcafe/moron/internal/diff"
 	"github.com/0xdeafcafe/moron/internal/git"
 	"github.com/0xdeafcafe/moron/internal/shared"
+)
+
+// viewMode tracks what the diff panel is displaying.
+type viewMode int
+
+const (
+	viewDiff viewMode = iota
+	viewLog
 )
 
 // Model is the diff viewer panel model.
@@ -28,6 +37,10 @@ type Model struct {
 	selectStart   int
 	selectedLines map[int]bool
 	styles        diff.RenderStyles
+	// Log view
+	mode       viewMode
+	logBranch  string
+	logEntries []git.LogEntry
 }
 
 func New() Model {
@@ -41,8 +54,20 @@ func (m *Model) SetSize(w, h int)      { m.width = w; m.height = h }
 func (m *Model) SetFocused(f bool)     { m.focused = f; if !f { m.lineSelect = false } }
 func (m *Model) SetRepoDir(dir string) { m.repoDir = dir }
 
+// SelectedLogHash returns the full hash of the currently selected log entry.
+func (m Model) SelectedLogHash() string {
+	if m.mode == viewLog && m.cursor < len(m.logEntries) {
+		return m.logEntries[m.cursor].Hash
+	}
+	return ""
+}
+
 // HintKeys returns context-sensitive shortcut hints.
 func (m Model) HintKeys() string {
+	if m.mode == viewLog {
+		return shared.HelpKeyStyle.Render("↑↓") + " scroll  " +
+			shared.HelpKeyStyle.Render("t") + " tag"
+	}
 	if m.lineSelect {
 		return shared.HelpKeyStyle.Render("space") + " stage  " +
 			shared.HelpKeyStyle.Render("u") + " unstage  " +
@@ -56,6 +81,7 @@ func (m Model) HintKeys() string {
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case shared.FileSelectedMsg:
+		m.mode = viewDiff
 		m.filePath = msg.Path
 		m.isCached = msg.Staged
 		m.isUntracked = msg.Untracked
@@ -63,12 +89,22 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.offset = 0
 		m.lineSelect = false
 		m.selectedLines = make(map[int]bool)
+		m.logEntries = nil
+		m.logBranch = ""
 		if msg.Path == "" {
 			m.fileDiffs = nil
 			m.rendered = nil
 			return m, nil
 		}
 		return m, m.loadDiff()
+
+	case shared.BranchLogMsg:
+		m.mode = viewLog
+		m.logBranch = msg.Branch
+		m.logEntries = msg.Log
+		m.cursor = 0
+		m.offset = 0
+		return m, nil
 
 	case shared.DiffUpdatedMsg:
 		if msg.Err != nil {
@@ -102,9 +138,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 			m.ensureVisible()
 		case tea.MouseWheelDown:
+			n := m.contentLen()
 			m.cursor += scrollAmount
-			if m.cursor >= len(m.rendered) {
-				m.cursor = len(m.rendered) - 1
+			if m.cursor >= n {
+				m.cursor = n - 1
 			}
 			if m.cursor < 0 {
 				m.cursor = 0
@@ -117,11 +154,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil
 		}
 
+		n := m.contentLen()
 		switch msg.String() {
 		case shared.KeyDown:
-			if len(m.rendered) > 0 {
+			if n > 0 {
 				m.cursor++
-				if m.cursor >= len(m.rendered) {
+				if m.cursor >= n {
 					m.cursor = 0
 				}
 				m.ensureVisible()
@@ -130,10 +168,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				}
 			}
 		case shared.KeyUp:
-			if len(m.rendered) > 0 {
+			if n > 0 {
 				m.cursor--
 				if m.cursor < 0 {
-					m.cursor = len(m.rendered) - 1
+					m.cursor = n - 1
 				}
 				m.ensureVisible()
 				if m.lineSelect {
@@ -146,8 +184,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				halfPage = 1
 			}
 			m.cursor += halfPage
-			if m.cursor >= len(m.rendered) {
-				m.cursor = len(m.rendered) - 1
+			if m.cursor >= n {
+				m.cursor = n - 1
 			}
 			if m.cursor < 0 {
 				m.cursor = 0
@@ -167,38 +205,66 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m.cursor = 0
 			m.ensureVisible()
 		case "G":
-			if len(m.rendered) > 0 {
-				m.cursor = len(m.rendered) - 1
+			if n > 0 {
+				m.cursor = n - 1
 				m.ensureVisible()
 			}
 		case shared.KeyNextHunk:
-			m.jumpToNextHunk()
+			if m.mode == viewDiff {
+				m.jumpToNextHunk()
+			}
 		case shared.KeyPrevHunk:
-			m.jumpToPrevHunk()
+			if m.mode == viewDiff {
+				m.jumpToPrevHunk()
+			}
 		case shared.KeyLineSelect:
-			m.lineSelect = !m.lineSelect
-			if m.lineSelect {
-				m.selectStart = m.cursor
-				m.selectedLines = make(map[int]bool)
-				m.updateSelection()
-			} else {
-				m.selectedLines = make(map[int]bool)
+			if m.mode == viewDiff {
+				m.lineSelect = !m.lineSelect
+				if m.lineSelect {
+					m.selectStart = m.cursor
+					m.selectedLines = make(map[int]bool)
+					m.updateSelection()
+				} else {
+					m.selectedLines = make(map[int]bool)
+				}
 			}
 		case shared.KeySpace, shared.KeyStage:
-			return m, m.stageAction(false)
+			if m.mode == viewDiff {
+				return m, m.stageAction(false)
+			}
 		case shared.KeyUnstage:
-			return m, m.stageAction(true)
+			if m.mode == viewDiff {
+				return m, m.stageAction(true)
+			}
 		case shared.KeyDiscard:
-			return m, m.discardAction()
+			if m.mode == viewDiff {
+				return m, m.discardAction()
+			}
 		case "t":
-			m.isCached = !m.isCached
-			m.cursor = 0
-			m.offset = 0
-			return m, m.loadDiff()
+			if m.mode == viewDiff {
+				m.isCached = !m.isCached
+				m.cursor = 0
+				m.offset = 0
+				return m, m.loadDiff()
+			}
 		}
 	}
 
 	return m, nil
+}
+
+func (m Model) contentLen() int {
+	if m.mode == viewLog {
+		return len(m.logEntries)
+	}
+	return len(m.rendered)
+}
+
+func (m Model) logEntryVisualLines(i int) int {
+	if i < 0 || i >= len(m.logEntries) {
+		return 0
+	}
+	return 2 + len(m.logEntries[i].GraphTail)
 }
 
 func (m *Model) ensureVisible() {
@@ -207,6 +273,24 @@ func (m *Model) ensureVisible() {
 	if viewHeight < 1 {
 		viewHeight = 1
 	}
+
+	if m.mode == viewLog {
+		if m.cursor < m.offset {
+			m.offset = m.cursor
+			return
+		}
+		// Sum visual lines from offset to cursor (inclusive)
+		total := 0
+		for i := m.offset; i <= m.cursor; i++ {
+			total += m.logEntryVisualLines(i)
+		}
+		for total > viewHeight && m.offset < m.cursor {
+			total -= m.logEntryVisualLines(m.offset)
+			m.offset++
+		}
+		return
+	}
+
 	if m.cursor < m.offset {
 		m.offset = m.cursor
 	}
@@ -372,13 +456,13 @@ func (m Model) View() string {
 	innerW := m.width - 2
 	innerH := m.height - 2
 
+	if m.mode == viewLog {
+		return m.viewLog(style, titleStyle, innerW, innerH)
+	}
+
 	titleText := "Diff"
 	if m.filePath != "" {
-		short := m.filePath
-		if idx := strings.LastIndex(short, "/"); idx >= 0 {
-			short = short[idx+1:]
-		}
-		titleText = short
+		titleText = m.filePath
 		if m.isCached {
 			titleText += " [Staged]"
 		} else {
@@ -467,4 +551,144 @@ func (m Model) View() string {
 	}
 
 	return style.Width(innerW).Height(innerH).Render(body)
+}
+
+func (m Model) viewLog(style, titleStyle lipgloss.Style, innerW, innerH int) string {
+	titleText := "Log"
+	if m.logBranch != "" {
+		titleText = m.logBranch + " log"
+	}
+	if len(m.logEntries) > 0 {
+		titleText += fmt.Sprintf(" (%d)", len(m.logEntries))
+	}
+	title := titleStyle.MaxWidth(innerW).Render(titleText)
+
+	contentHeight := innerH - 1
+	if contentHeight < 0 {
+		contentHeight = 0
+	}
+
+	graphStyle := lipgloss.NewStyle().Foreground(shared.ColorSecondary)
+	graphNodeStyle := lipgloss.NewStyle().Foreground(shared.ColorWarning).Bold(true)
+
+	var lines []string
+	if len(m.logEntries) == 0 {
+		lines = append(lines, shared.HelpDescStyle.Render("  No commits"))
+	} else {
+		for i := m.offset; i < len(m.logEntries) && len(lines) < contentHeight; i++ {
+			entry := m.logEntries[i]
+
+			// Style graph prefix: * in yellow/bold, pipes/slashes in cyan
+			styledGraph := styleGraph(entry.Graph, graphStyle, graphNodeStyle)
+
+			// Continuation graph for line 2: replace * with |
+			contGraph := strings.Replace(entry.Graph, "*", "|", 1)
+			styledContGraph := styleGraph(contGraph, graphStyle, graphNodeStyle)
+
+			hash := shared.DiffHunkHeaderStyle.Render(entry.ShortHash)
+			subject := entry.Subject
+			graphLen := len(entry.Graph)
+			maxSubject := innerW - graphLen - 10
+			if maxSubject < 5 {
+				maxSubject = 5
+			}
+			if len(subject) > maxSubject {
+				subject = subject[:maxSubject-1] + "…"
+			}
+
+			// Line 1: graph + hash + subject
+			line1 := styledGraph + hash + " " + subject
+			line1 = lipgloss.NewStyle().MaxWidth(innerW).Render(line1)
+
+			// Line 2: continuation graph + author + relative time
+			meta := styledContGraph + shared.HelpDescStyle.Render(entry.Author+" • "+relativeTime(entry.AuthorDate))
+			meta = lipgloss.NewStyle().MaxWidth(innerW).Render(meta)
+
+			if i == m.cursor && m.focused {
+				line1 = shared.CursorStyle.Width(innerW).Render(line1)
+				meta = shared.CursorStyle.Width(innerW).Render(meta)
+			} else {
+				line1 = lipgloss.NewStyle().Width(innerW).Render(line1)
+				meta = lipgloss.NewStyle().Width(innerW).Render(meta)
+			}
+			lines = append(lines, line1, meta)
+
+			// Graph tail lines (continuation lines between commits)
+			for _, tail := range entry.GraphTail {
+				if len(lines) >= contentHeight {
+					break
+				}
+				tailLine := styleGraph(tail, graphStyle, graphNodeStyle)
+				tailLine = lipgloss.NewStyle().Width(innerW).Render(tailLine)
+				lines = append(lines, tailLine)
+			}
+		}
+	}
+
+	for len(lines) < contentHeight {
+		lines = append(lines, "")
+	}
+	if len(lines) > contentHeight {
+		lines = lines[:contentHeight]
+	}
+
+	body := title + "\n" + strings.Join(lines, "\n")
+	return style.Width(innerW).Height(innerH).Render(body)
+}
+
+// styleGraph colorizes graph characters: * in bold yellow, structural chars in cyan.
+func styleGraph(graph string, pipeStyle, nodeStyle lipgloss.Style) string {
+	var b strings.Builder
+	for _, ch := range graph {
+		switch ch {
+		case '*':
+			b.WriteString(nodeStyle.Render(string(ch)))
+		case '|', '/', '\\', '_':
+			b.WriteString(pipeStyle.Render(string(ch)))
+		default:
+			b.WriteRune(ch)
+		}
+	}
+	return b.String()
+}
+
+func relativeTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		m := int(d.Minutes())
+		if m == 1 {
+			return "1 minute ago"
+		}
+		return fmt.Sprintf("%d minutes ago", m)
+	case d < 24*time.Hour:
+		h := int(d.Hours())
+		if h == 1 {
+			return "1 hour ago"
+		}
+		return fmt.Sprintf("%d hours ago", h)
+	case d < 30*24*time.Hour:
+		days := int(d.Hours() / 24)
+		if days == 1 {
+			return "yesterday"
+		}
+		return fmt.Sprintf("%d days ago", days)
+	case d < 365*24*time.Hour:
+		months := int(d.Hours() / 24 / 30)
+		if months <= 1 {
+			return "1 month ago"
+		}
+		return fmt.Sprintf("%d months ago", months)
+	default:
+		years := int(d.Hours() / 24 / 365)
+		if years == 1 {
+			return "1 year ago"
+		}
+		return fmt.Sprintf("%d years ago", years)
+	}
 }

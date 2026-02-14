@@ -15,8 +15,9 @@ func FindRepo(startDir string) (string, error) {
 
 	for {
 		gitDir := filepath.Join(dir, ".git")
-		info, err := os.Stat(gitDir)
-		if err == nil && info.IsDir() {
+		_, err := os.Stat(gitDir)
+		if err == nil {
+			// .git can be a directory (normal repo) or a file (submodule/worktree)
 			return dir, nil
 		}
 

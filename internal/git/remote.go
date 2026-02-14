@@ -23,6 +23,15 @@ func Fetch(repoDir, remote string) error {
 	return err
 }
 
+// FetchAll fetches from all remotes.
+func FetchAll(repoDir string) error {
+	_, err := Run(RunOpts{
+		Dir:  repoDir,
+		Args: []string{"fetch", "--all"},
+	})
+	return err
+}
+
 // Pull pulls from the given remote.
 func Pull(repoDir, remote, branch string) error {
 	_, err := Run(RunOpts{

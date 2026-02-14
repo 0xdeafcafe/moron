@@ -3,16 +3,21 @@ package app
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/0xdeafcafe/moron/internal/config"
 	"github.com/0xdeafcafe/moron/internal/git"
 	"github.com/0xdeafcafe/moron/internal/shared"
 	"github.com/0xdeafcafe/moron/internal/ui/branches"
 	"github.com/0xdeafcafe/moron/internal/ui/dialog"
 	"github.com/0xdeafcafe/moron/internal/ui/diffview"
+	"github.com/0xdeafcafe/moron/internal/ui/palette"
 	"github.com/0xdeafcafe/moron/internal/ui/workingcopy"
 )
+
+const fetchInterval = 30 * time.Second
 
 // Model is the root application model.
 type Model struct {
@@ -25,7 +30,9 @@ type Model struct {
 	workingCopy workingcopy.Model
 	diffView    diffview.Model
 	dialog      dialog.Model
+	palette     palette.Model
 
+	settings  config.Settings
 	statusBar string
 	showHelp  bool
 }
@@ -43,6 +50,10 @@ func New(repoDir string) Model {
 	dv.SetRepoDir(repoDir)
 
 	d := dialog.New()
+	p := palette.New()
+	s := config.LoadSettings()
+
+	wc.SetFileView(string(s.FileView))
 
 	return Model{
 		repoDir:     repoDir,
@@ -51,14 +62,32 @@ func New(repoDir string) Model {
 		workingCopy: wc,
 		diffView:    dv,
 		dialog:      d,
+		palette:     p,
+		settings:    s,
 	}
 }
 
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		tea.EnterAltScreen,
+		m.backgroundFetch(),
 		m.refreshAll(),
+		m.scheduleFetch(),
 	)
+}
+
+func (m Model) backgroundFetch() tea.Cmd {
+	repoDir := m.repoDir
+	return func() tea.Msg {
+		err := git.FetchAll(repoDir)
+		return shared.BackgroundFetchDoneMsg{Err: err}
+	}
+}
+
+func (m Model) scheduleFetch() tea.Cmd {
+	return tea.Tick(fetchInterval, func(time.Time) tea.Msg {
+		return shared.TickFetchMsg{}
+	})
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -81,6 +110,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case tea.KeyMsg:
+		// Palette captures all input when active
+		if m.palette.Active() {
+			var cmd tea.Cmd
+			m.palette, cmd = m.palette.Update(msg)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			return m, tea.Batch(cmds...)
+		}
+
 		// Dialog captures all input when active
 		if m.dialog.Active() {
 			var cmd tea.Cmd
@@ -109,24 +148,96 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case shared.KeyTab, "right":
 				m.activePanel = (m.activePanel + 1) % 3
-				m.updateFocus()
-				return m, nil
+				return m, m.updateFocus()
 			case shared.KeyShiftTab, "left":
 				m.activePanel = (m.activePanel + 2) % 3
-				m.updateFocus()
-				return m, nil
+				return m, m.updateFocus()
 			case shared.KeyPanel1:
 				m.activePanel = shared.PanelBranches
-				m.updateFocus()
-				return m, nil
+				return m, m.updateFocus()
 			case shared.KeyPanel2:
 				m.activePanel = shared.PanelWorkingCopy
-				m.updateFocus()
-				return m, nil
+				return m, m.updateFocus()
 			case shared.KeyPanel3:
 				m.activePanel = shared.PanelDiff
+				return m, m.updateFocus()
+			case shared.KeyNewBranch:
+				m.activePanel = shared.PanelBranches
 				m.updateFocus()
+				m.branches.StartCreateBranch()
 				return m, nil
+			case shared.KeyAddRemote:
+				m.activePanel = shared.PanelBranches
+				m.updateFocus()
+				m.branches.StartAddRemote()
+				return m, nil
+			case shared.KeyPush:
+				remote := m.branches.PushRemote()
+				curBranch := m.branches.CurrentBranch()
+				repoDir := m.repoDir
+				return m, func() tea.Msg {
+					return shared.ShowDialogMsg{
+						Type:    shared.DialogConfirm,
+						Title:   "Push",
+						Message: fmt.Sprintf("Push %s to %s?", curBranch, remote),
+						OnConfirm: func() tea.Msg {
+							err := git.Push(repoDir, remote, curBranch, false)
+							return shared.PushResultMsg{Err: err}
+						},
+					}
+				}
+			case shared.KeyForcePush:
+				remote := m.branches.PushRemote()
+				curBranch := m.branches.CurrentBranch()
+				repoDir := m.repoDir
+				return m, func() tea.Msg {
+					return shared.ShowDialogMsg{
+						Type:    shared.DialogConfirm,
+						Title:   "Force Push",
+						Message: fmt.Sprintf("Force push %s to %s?", curBranch, remote),
+						OnConfirm: func() tea.Msg {
+							err := git.Push(repoDir, remote, curBranch, true)
+							return shared.PushResultMsg{Err: err}
+						},
+					}
+				}
+			case shared.KeyFetch:
+				repoDir := m.repoDir
+				return m, func() tea.Msg {
+					err := git.FetchAll(repoDir)
+					return shared.FetchResultMsg{Err: err}
+				}
+			case "ctrl+p":
+				// Command palette — switch branch
+				var items []palette.Item
+				for _, b := range m.branches.AllBranches() {
+					detail := "local"
+					if b.IsCurrent {
+						detail = "current"
+					}
+					items = append(items, palette.Item{Label: b.Name, Detail: detail, Value: b.Name})
+				}
+				for _, rb := range m.branches.AllRemoteBranches() {
+					items = append(items, palette.Item{Label: rb.Name, Detail: "remote", Value: rb.Name})
+				}
+				m.palette.Show("Switch Branch", "checkout", items)
+				return m, nil
+			case "ctrl+k":
+				// Settings palette
+				items := []palette.Item{
+					{Label: "File View: Tree", Detail: "group files by directory", Value: "tree"},
+					{Label: "File View: List", Detail: "flat file list", Value: "list"},
+				}
+				m.palette.Show("Settings", "fileview", items)
+				return m, nil
+			case shared.KeyPull:
+				remote := m.branches.PushRemote()
+				curBranch := m.branches.CurrentBranch()
+				repoDir := m.repoDir
+				return m, func() tea.Msg {
+					err := git.Pull(repoDir, remote, curBranch)
+					return shared.PullResultMsg{Err: err}
+				}
 			}
 		}
 
@@ -145,6 +256,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, cmd)
 			}
 		case shared.PanelDiff:
+			// Intercept tag creation from log view
+			if msg.String() == shared.KeyCreateTag {
+				if hash := m.diffView.SelectedLogHash(); hash != "" {
+					m.activePanel = shared.PanelBranches
+					m.updateFocus()
+					m.branches.StartCreateTag(hash)
+					return m, nil
+				}
+			}
 			var cmd tea.Cmd
 			m.diffView, cmd = m.diffView.Update(msg)
 			if cmd != nil {
@@ -154,14 +274,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case shared.FocusPanelMsg:
 		m.activePanel = msg.Panel
-		m.updateFocus()
-		return m, nil
+		return m, m.updateFocus()
 
 	case shared.RefreshMsg:
 		cmds = append(cmds, m.refreshAll())
 
 	case shared.StatusUpdatedMsg:
 		m.workingCopy, _ = m.workingCopy.Update(msg)
+		m.branches, _ = m.branches.Update(msg)
 		if msg.Err != nil {
 			m.statusBar = "Error: " + msg.Err.Error()
 		}
@@ -171,6 +291,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.workingCopy, _ = m.workingCopy.Update(msg)
 		if msg.Err != nil {
 			m.statusBar = "Error: " + msg.Err.Error()
+		}
+
+	case shared.BranchLogMsg:
+		var cmd tea.Cmd
+		m.diffView, cmd = m.diffView.Update(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 
 	case shared.DiffUpdatedMsg:
@@ -193,6 +320,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case shared.CheckoutResultMsg:
 		if msg.Err != nil {
+			if git.IsCheckoutConflict(msg.Err) {
+				branch := msg.Branch
+				repoDir := m.repoDir
+				return m, func() tea.Msg {
+					return shared.ShowDialogMsg{
+						Type:    shared.DialogConfirm,
+						Title:   "Stash & Switch",
+						Message: fmt.Sprintf("You have uncommitted changes. Stash and switch to %s?", branch),
+						OnConfirm: func() tea.Msg {
+							if err := git.StashPush(repoDir); err != nil {
+								return shared.CheckoutResultMsg{Branch: branch, Err: fmt.Errorf("stash failed: %w", err)}
+							}
+							err := git.Checkout(repoDir, branch)
+							return shared.CheckoutResultMsg{Branch: branch, Err: err}
+						},
+					}
+				}
+			}
 			m.statusBar = "Checkout failed: " + msg.Err.Error()
 		} else {
 			m.statusBar = "Switched to " + msg.Branch
@@ -206,6 +351,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusBar = "Pushed successfully"
 			cmds = append(cmds, m.refreshAll())
 		}
+
+	case shared.BackgroundFetchDoneMsg:
+		// Silent fetch completed — just refresh data
+		cmds = append(cmds, m.refreshAll())
+
+	case shared.TickFetchMsg:
+		cmds = append(cmds, m.backgroundFetch(), m.scheduleFetch())
 
 	case shared.FetchResultMsg:
 		if msg.Err != nil {
@@ -247,12 +399,55 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.refreshAll())
 		}
 
+	case shared.StashesUpdatedMsg:
+		m.branches, _ = m.branches.Update(msg)
+
+	case shared.StashResultMsg:
+		if msg.Err != nil {
+			m.statusBar = fmt.Sprintf("Stash %s failed: %s", msg.Action, msg.Err.Error())
+		} else {
+			m.statusBar = fmt.Sprintf("Stash %s successful", msg.Action)
+			cmds = append(cmds, m.refreshAll())
+		}
+
+	case shared.CreateTagResultMsg:
+		if msg.Err != nil {
+			m.statusBar = "Create tag failed: " + msg.Err.Error()
+		} else {
+			m.statusBar = "Created tag " + msg.Tag
+			cmds = append(cmds, m.refreshAll())
+		}
+
+	case shared.DeleteTagResultMsg:
+		if msg.Err != nil {
+			m.statusBar = "Delete tag failed: " + msg.Err.Error()
+		} else {
+			m.statusBar = "Deleted tag " + msg.Tag
+			cmds = append(cmds, m.refreshAll())
+		}
+
 	case shared.AddRemoteResultMsg:
 		if msg.Err != nil {
 			m.statusBar = "Add remote failed: " + msg.Err.Error()
 		} else {
 			m.statusBar = "Added remote " + msg.Name
 			cmds = append(cmds, m.refreshAll())
+		}
+
+	case palette.ResultMsg:
+		switch msg.Action {
+		case "checkout":
+			branch := msg.Value
+			repoDir := m.repoDir
+			return m, func() tea.Msg {
+				err := git.Checkout(repoDir, branch)
+				return shared.CheckoutResultMsg{Branch: branch, Err: err}
+			}
+		case "fileview":
+			m.settings.FileView = config.FileView(msg.Value)
+			m.workingCopy.SetFileView(msg.Value)
+			_ = config.SaveSettings(m.settings)
+			m.statusBar = "File view: " + msg.Value
 		}
 
 	case shared.ErrorMsg:
@@ -282,10 +477,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func (m *Model) updateFocus() {
-	m.branches.SetFocused(m.activePanel == shared.PanelBranches)
+func (m *Model) updateFocus() tea.Cmd {
+	cmd := m.branches.SetFocused(m.activePanel == shared.PanelBranches)
 	m.workingCopy.SetFocused(m.activePanel == shared.PanelWorkingCopy)
 	m.diffView.SetFocused(m.activePanel == shared.PanelDiff)
+	return cmd
 }
 
 func (m *Model) updateLayout() {
@@ -324,6 +520,7 @@ func (m *Model) updateLayout() {
 	m.workingCopy.SetSize(centerW, contentHeight)
 	m.diffView.SetSize(rightW, contentHeight)
 	m.dialog.SetSize(m.width, m.height)
+	m.palette.SetSize(m.width, m.height)
 }
 
 func (m Model) refreshAll() tea.Cmd {
@@ -356,6 +553,10 @@ func (m Model) refreshAll() tea.Cmd {
 				Worktrees:      worktrees,
 				CurrentBranch:  currentBranch,
 			}
+		},
+		func() tea.Msg {
+			stashes, err := git.StashList(repoDir)
+			return shared.StashesUpdatedMsg{Stashes: stashes, Err: err}
 		},
 	)
 }
@@ -404,6 +605,10 @@ func (m Model) View() string {
 
 	view := mainContent + "\n" + statusLine
 
+	if m.palette.Active() {
+		view = m.overlayDialog(view, m.palette.View())
+	}
+
 	if m.dialog.Active() {
 		overlay := m.dialog.View()
 		view = m.overlayDialog(view, overlay)
@@ -446,12 +651,15 @@ func (m Model) renderHelp() string {
 		{"← / → / Tab", "Switch panel"},
 		{"1 / 2 / 3", "Focus panel"},
 		{"↑ / ↓", "Navigate"},
+		{"ctrl+p", "Switch branch palette"},
+		{"ctrl+k", "Settings palette"},
 		{"", ""},
 		{"--- Branches ---", ""},
 		{"Enter", "Checkout branch"},
 		{"Space", "Expand/collapse group"},
 		{"n", "Create new branch"},
-		{"x", "Delete branch"},
+		{"t", "Create tag"},
+		{"x", "Delete branch/tag/stash"},
 		{"A", "Add remote"},
 		{"p / P", "Push / Force push"},
 		{"l", "Pull from remote"},
@@ -469,12 +677,12 @@ func (m Model) renderHelp() string {
 		{"enter", "Submit commit"},
 		{"a", "Toggle amend"},
 		{"", ""},
-		{"--- Diff ---", ""},
+		{"--- Diff / Log ---", ""},
 		{"Space / s", "Stage hunk (or selection)"},
 		{"u", "Unstage hunk (or selection)"},
 		{"d", "Discard hunk"},
 		{"v", "Select lines"},
-		{"t", "Toggle staged/unstaged"},
+		{"t", "Create tag at commit"},
 		{"J / K", "Next/prev hunk"},
 		{"ctrl+d / ctrl+u", "Half-page scroll"},
 		{"?", "Toggle this help"},

@@ -13,17 +13,25 @@ type LogEntry struct {
 	Subject    string
 	Author     string
 	AuthorDate time.Time
+	Graph      string   // graph prefix chars (e.g. "* ", "| * ")
+	GraphTail  []string // continuation graph lines after this commit
 }
 
-// Log returns the commit log for the current branch.
-func Log(repoDir string, limit int) ([]LogEntry, error) {
+// Log returns the commit log for the given ref (branch name, HEAD, etc.).
+// Includes graph data for visualizing branch topology.
+func Log(repoDir string, limit int, ref ...string) ([]LogEntry, error) {
+	args := []string{
+		"log",
+		"--graph",
+		"--format=%x00%H%x00%h%x00%s%x00%an%x00%aI",
+		"-n", fmt.Sprintf("%d", limit),
+	}
+	if len(ref) > 0 && ref[0] != "" {
+		args = append(args, ref[0])
+	}
 	result, err := Run(RunOpts{
-		Dir: repoDir,
-		Args: []string{
-			"log",
-			"--format=%H\x00%h\x00%s\x00%an\x00%aI",
-			"-n", fmt.Sprintf("%d", limit),
-		},
+		Dir:  repoDir,
+		Args: args,
 	})
 	if err != nil {
 		return nil, err
@@ -34,18 +42,30 @@ func Log(repoDir string, limit int) ([]LogEntry, error) {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\x00", 5)
-		if len(parts) < 5 {
-			continue
+
+		// Commit lines contain \x00: <graph>\x00<hash>\x00<short>\x00<subject>\x00<author>\x00<date>
+		if idx := strings.Index(line, "\x00"); idx >= 0 {
+			graphPrefix := line[:idx]
+			rest := line[idx+1:]
+			parts := strings.SplitN(rest, "\x00", 5)
+			if len(parts) < 5 {
+				continue
+			}
+			date, _ := time.Parse(time.RFC3339, parts[4])
+			entries = append(entries, LogEntry{
+				Hash:       parts[0],
+				ShortHash:  parts[1],
+				Subject:    parts[2],
+				Author:     parts[3],
+				AuthorDate: date,
+				Graph:      graphPrefix,
+			})
+		} else {
+			// Graph-only continuation line — attach to the last entry
+			if len(entries) > 0 {
+				entries[len(entries)-1].GraphTail = append(entries[len(entries)-1].GraphTail, line)
+			}
 		}
-		date, _ := time.Parse(time.RFC3339, parts[4])
-		entries = append(entries, LogEntry{
-			Hash:       parts[0],
-			ShortHash:  parts[1],
-			Subject:    parts[2],
-			Author:     parts[3],
-			AuthorDate: date,
-		})
 	}
 
 	return entries, nil

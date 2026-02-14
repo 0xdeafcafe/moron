@@ -19,6 +19,14 @@ const (
 // RefreshMsg triggers a full data refresh.
 type RefreshMsg struct{}
 
+// BackgroundFetchDoneMsg signals a background fetch completed.
+type BackgroundFetchDoneMsg struct {
+	Err error
+}
+
+// TickFetchMsg triggers a periodic background fetch.
+type TickFetchMsg struct{}
+
 // StatusUpdatedMsg carries refreshed status data.
 type StatusUpdatedMsg struct {
 	Files []git.FileStatus
@@ -103,6 +111,37 @@ type DeleteBranchResultMsg struct {
 type AddRemoteResultMsg struct {
 	Name string
 	Err  error
+}
+
+// BranchLogMsg carries commit history for a selected branch.
+type BranchLogMsg struct {
+	Branch string
+	Log    []git.LogEntry
+	Err    error
+}
+
+// CreateTagResultMsg carries the result of creating a tag.
+type CreateTagResultMsg struct {
+	Tag string
+	Err error
+}
+
+// DeleteTagResultMsg carries the result of deleting a tag.
+type DeleteTagResultMsg struct {
+	Tag string
+	Err error
+}
+
+// StashResultMsg carries the result of a stash operation.
+type StashResultMsg struct {
+	Action string // "push", "pop", "apply", "drop"
+	Err    error
+}
+
+// StashesUpdatedMsg carries refreshed stash data.
+type StashesUpdatedMsg struct {
+	Stashes []git.StashEntry
+	Err     error
 }
 
 // FocusPanelMsg requests focus change to a specific panel.

@@ -16,6 +16,7 @@ type treeNode struct {
 	Tag        *git.Tag
 	Remote     *git.Remote
 	Worktree   *git.Worktree
+	Stash      *git.StashEntry
 	IsGroup    bool
 	IsExpanded bool
 	Depth      int
@@ -28,6 +29,7 @@ const (
 	inputCreateBranch
 	inputAddRemoteName
 	inputAddRemoteURL
+	inputCreateTag
 )
 
 // Model is the branches panel model.
@@ -43,14 +45,18 @@ type Model struct {
 	tags           []git.Tag
 	remotes        []git.Remote
 	worktrees      []git.Worktree
+	stashes        []git.StashEntry
 	currentBranch  string
 	repoDir        string
 	firstBuild     bool
+	stagedCount    int
+	unstagedCount  int
 	// Input mode
 	mode         inputMode
 	inputText    string
 	inputCursor  int
 	remoteName   string // stored between remote name and URL steps
+	tagRef       string // ref for tag creation (empty = HEAD)
 }
 
 func New() Model {
@@ -58,9 +64,40 @@ func New() Model {
 }
 
 func (m *Model) SetSize(w, h int)       { m.width = w; m.height = h }
-func (m *Model) SetFocused(f bool)      { m.focused = f; if !f { m.mode = inputNone } }
+func (m *Model) SetFocused(f bool) tea.Cmd {
+	m.focused = f
+	if !f {
+		m.mode = inputNone
+		return nil
+	}
+	return m.emitLogRequest()
+}
 func (m *Model) SetRepoDir(dir string)  { m.repoDir = dir }
 func (m Model) IsTyping() bool          { return m.mode != inputNone }
+
+func (m Model) CurrentBranch() string        { return m.currentBranch }
+func (m Model) AllBranches() []git.Branch    { return m.branches }
+func (m Model) AllRemoteBranches() []git.Branch { return m.remoteBranches }
+func (m *Model) StartCreateBranch() { m.mode = inputCreateBranch; m.inputText = ""; m.inputCursor = 0 }
+func (m *Model) StartAddRemote()    { m.mode = inputAddRemoteName; m.inputText = ""; m.inputCursor = 0 }
+func (m *Model) StartCreateTag(ref string) { m.mode = inputCreateTag; m.inputText = ""; m.inputCursor = 0; m.tagRef = ref }
+
+// PushRemote returns the remote name to push to for the current branch.
+// Uses the upstream remote if set, otherwise falls back to the first remote.
+func (m Model) PushRemote() string {
+	for _, b := range m.branches {
+		if b.IsCurrent && b.Upstream != "" {
+			// Upstream is like "origin/main" — extract the remote name
+			if idx := strings.Index(b.Upstream, "/"); idx > 0 {
+				return b.Upstream[:idx]
+			}
+		}
+	}
+	if len(m.remotes) > 0 {
+		return m.remotes[0].Name
+	}
+	return "origin"
+}
 
 // HintKeys returns context-sensitive shortcut hints.
 func (m Model) HintKeys() string {
@@ -71,6 +108,26 @@ func (m Model) HintKeys() string {
 	return shared.HelpKeyStyle.Render("enter") + " checkout  " +
 		shared.HelpKeyStyle.Render("n") + " new  " +
 		shared.HelpKeyStyle.Render("x") + " delete"
+}
+
+// SelectedBranch returns the branch name under the cursor, if any.
+func (m Model) SelectedBranch() string {
+	if m.cursor < len(m.nodes) && m.nodes[m.cursor].Branch != nil {
+		return m.nodes[m.cursor].Branch.Name
+	}
+	return ""
+}
+
+func (m Model) emitLogRequest() tea.Cmd {
+	branch := m.SelectedBranch()
+	if branch == "" {
+		return nil
+	}
+	repoDir := m.repoDir
+	return func() tea.Msg {
+		entries, err := git.Log(repoDir, 50, branch)
+		return shared.BranchLogMsg{Branch: branch, Log: entries, Err: err}
+	}
 }
 
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
@@ -86,6 +143,31 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.worktrees = msg.Worktrees
 		m.currentBranch = msg.CurrentBranch
 		m.rebuildTree()
+		if m.focused {
+			return m, m.emitLogRequest()
+		}
+		return m, nil
+
+	case shared.StashesUpdatedMsg:
+		if msg.Err == nil {
+			m.stashes = msg.Stashes
+			m.rebuildTree()
+		}
+		return m, nil
+
+	case shared.StatusUpdatedMsg:
+		if msg.Err == nil {
+			m.stagedCount = 0
+			m.unstagedCount = 0
+			for _, f := range msg.Files {
+				if f.Staged != "" {
+					m.stagedCount++
+				}
+				if f.Unstaged != "" {
+					m.unstagedCount++
+				}
+			}
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -105,6 +187,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					m.cursor = 0
 				}
 				m.ensureVisible()
+				return m, m.emitLogRequest()
 			}
 		case shared.KeyUp:
 			if len(m.nodes) > 0 {
@@ -113,6 +196,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					m.cursor = len(m.nodes) - 1
 				}
 				m.ensureVisible()
+				return m, m.emitLogRequest()
 			}
 		case shared.KeySpace:
 			if m.cursor < len(m.nodes) && m.nodes[m.cursor].IsGroup {
@@ -129,20 +213,58 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 						return shared.CheckoutResultMsg{Branch: branch, Err: err}
 					}
 				}
+				if node.Stash != nil {
+					stashIdx := node.Stash.Index
+					repoDir := m.repoDir
+					return m, func() tea.Msg {
+						return shared.ShowDialogMsg{
+							Type:    shared.DialogConfirm,
+							Title:   "Pop Stash",
+							Message: fmt.Sprintf("Pop %s?", stashIdx),
+							OnConfirm: func() tea.Msg {
+								err := git.StashPop(repoDir, stashIdx)
+								return shared.StashResultMsg{Action: "pop", Err: err}
+							},
+						}
+					}
+				}
 			}
-		case shared.KeyNewBranch:
-			m.mode = inputCreateBranch
-			m.inputText = ""
-			m.inputCursor = 0
-			return m, nil
-		case shared.KeyAddRemote:
-			m.mode = inputAddRemoteName
-			m.inputText = ""
-			m.inputCursor = 0
+		case shared.KeyCreateTag:
+			m.StartCreateTag("")
 			return m, nil
 		case shared.KeyDeleteBranch:
 			if m.cursor < len(m.nodes) {
 				node := m.nodes[m.cursor]
+				if node.Tag != nil {
+					tagName := node.Tag.Name
+					repoDir := m.repoDir
+					return m, func() tea.Msg {
+						return shared.ShowDialogMsg{
+							Type:    shared.DialogConfirm,
+							Title:   "Delete Tag",
+							Message: fmt.Sprintf("Delete tag %s?", tagName),
+							OnConfirm: func() tea.Msg {
+								err := git.DeleteTag(repoDir, tagName)
+								return shared.DeleteTagResultMsg{Tag: tagName, Err: err}
+							},
+						}
+					}
+				}
+				if node.Stash != nil {
+					stashIdx := node.Stash.Index
+					repoDir := m.repoDir
+					return m, func() tea.Msg {
+						return shared.ShowDialogMsg{
+							Type:    shared.DialogConfirm,
+							Title:   "Drop Stash",
+							Message: fmt.Sprintf("Drop %s? This cannot be undone.", stashIdx),
+							OnConfirm: func() tea.Msg {
+								err := git.StashDrop(repoDir, stashIdx)
+								return shared.StashResultMsg{Action: "drop", Err: err}
+							},
+						}
+					}
+				}
 				if node.Branch != nil && !node.Branch.IsCurrent && !node.Branch.IsRemote {
 					branchName := node.Branch.Name
 					repoDir := m.repoDir
@@ -158,47 +280,6 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 						}
 					}
 				}
-			}
-		case shared.KeyPush:
-			curBranch := m.currentBranch
-			repoDir := m.repoDir
-			return m, func() tea.Msg {
-				return shared.ShowDialogMsg{
-					Type:    shared.DialogConfirm,
-					Title:   "Push",
-					Message: fmt.Sprintf("Push %s to origin?", curBranch),
-					OnConfirm: func() tea.Msg {
-						err := git.Push(repoDir, "origin", curBranch, false)
-						return shared.PushResultMsg{Err: err}
-					},
-				}
-			}
-		case shared.KeyForcePush:
-			curBranch := m.currentBranch
-			repoDir := m.repoDir
-			return m, func() tea.Msg {
-				return shared.ShowDialogMsg{
-					Type:    shared.DialogConfirm,
-					Title:   "Force Push",
-					Message: fmt.Sprintf("Force push %s to origin?", curBranch),
-					OnConfirm: func() tea.Msg {
-						err := git.Push(repoDir, "origin", curBranch, true)
-						return shared.PushResultMsg{Err: err}
-					},
-				}
-			}
-		case "f":
-			repoDir := m.repoDir
-			return m, func() tea.Msg {
-				err := git.Fetch(repoDir, "origin")
-				return shared.FetchResultMsg{Err: err}
-			}
-		case shared.KeyPull:
-			curBranch := m.currentBranch
-			repoDir := m.repoDir
-			return m, func() tea.Msg {
-				err := git.Pull(repoDir, "origin", curBranch)
-				return shared.PullResultMsg{Err: err}
 			}
 		case shared.KeyRebase:
 			if m.cursor < len(m.nodes) {
@@ -259,6 +340,16 @@ func (m Model) handleInput(msg tea.KeyMsg) (Model, tea.Cmd) {
 			return m, func() tea.Msg {
 				err := git.AddRemote(repoDir, remoteName, text)
 				return shared.AddRemoteResultMsg{Name: remoteName, Err: err}
+			}
+		case inputCreateTag:
+			ref := m.tagRef
+			m.mode = inputNone
+			m.inputText = ""
+			m.tagRef = ""
+			repoDir := m.repoDir
+			return m, func() tea.Msg {
+				err := git.CreateTag(repoDir, text, ref)
+				return shared.CreateTagResultMsg{Tag: text, Err: err}
 			}
 		}
 	case "backspace":
@@ -367,90 +458,104 @@ func (m *Model) rebuildTree() {
 	}
 
 	// --- Tags (collapsed by default) ---
-	if len(m.tags) > 0 {
-		tagLabel := fmt.Sprintf("Tags (%d)", len(m.tags))
-		tagsExpanded := false
-		if v, ok := expandState[tagLabel]; ok {
-			tagsExpanded = v
-		} else if v, ok := expandState[m.findOldLabel("Tags")]; ok {
-			tagsExpanded = v
-		} else if !m.firstBuild {
-			tagsExpanded = false
-		}
-		nodes = append(nodes, treeNode{Label: tagLabel, IsGroup: true, IsExpanded: tagsExpanded})
-		if tagsExpanded {
-			for i := range m.tags {
-				t := m.tags[i]
-				nodes = append(nodes, treeNode{Label: t.Name, Tag: &t, Depth: 1})
-			}
+	tagLabel := fmt.Sprintf("Tags (%d)", len(m.tags))
+	tagsExpanded := false
+	if v, ok := expandState[tagLabel]; ok {
+		tagsExpanded = v
+	} else if v, ok := expandState[m.findOldLabel("Tags")]; ok {
+		tagsExpanded = v
+	}
+	nodes = append(nodes, treeNode{Label: tagLabel, IsGroup: true, IsExpanded: tagsExpanded})
+	if tagsExpanded {
+		for i := range m.tags {
+			t := m.tags[i]
+			nodes = append(nodes, treeNode{Label: t.Name, Tag: &t, Depth: 1})
 		}
 	}
 
 	// --- Remotes ---
-	if len(m.remotes) > 0 {
-		remoteBranchCount := len(m.remoteBranches)
-		remoteLabel := fmt.Sprintf("Remotes (%d)", remoteBranchCount)
-		remotesExpanded := true
-		if v, ok := expandState[remoteLabel]; ok {
-			remotesExpanded = v
-		} else if v, ok := expandState[m.findOldLabel("Remotes")]; ok {
-			remotesExpanded = v
-		}
-		nodes = append(nodes, treeNode{Label: remoteLabel, IsGroup: true, IsExpanded: remotesExpanded})
-		if remotesExpanded {
-			for _, remote := range m.remotes {
-				var count int
-				for _, rb := range m.remoteBranches {
+	remoteBranchCount := len(m.remoteBranches)
+	remoteLabel := fmt.Sprintf("Remotes (%d)", remoteBranchCount)
+	remotesExpanded := true
+	if v, ok := expandState[remoteLabel]; ok {
+		remotesExpanded = v
+	} else if v, ok := expandState[m.findOldLabel("Remotes")]; ok {
+		remotesExpanded = v
+	}
+	nodes = append(nodes, treeNode{Label: remoteLabel, IsGroup: true, IsExpanded: remotesExpanded})
+	if remotesExpanded {
+		for _, remote := range m.remotes {
+			var count int
+			for _, rb := range m.remoteBranches {
+				if strings.HasPrefix(rb.Name, remote.Name+"/") {
+					count++
+				}
+			}
+			remoteNodeLabel := fmt.Sprintf("%s (%d)", remote.Name, count)
+			rExpanded := false
+			if v, ok := expandState[remoteNodeLabel]; ok {
+				rExpanded = v
+			} else if v, ok := expandState[remote.Name]; ok {
+				rExpanded = v
+			}
+			r := remote
+			nodes = append(nodes, treeNode{
+				Label: remoteNodeLabel, Remote: &r, IsGroup: true, IsExpanded: rExpanded, Depth: 1,
+			})
+			if rExpanded {
+				for i := range m.remoteBranches {
+					rb := m.remoteBranches[i]
 					if strings.HasPrefix(rb.Name, remote.Name+"/") {
-						count++
-					}
-				}
-				remoteNodeLabel := fmt.Sprintf("%s (%d)", remote.Name, count)
-				rExpanded := false
-				if v, ok := expandState[remoteNodeLabel]; ok {
-					rExpanded = v
-				} else if v, ok := expandState[remote.Name]; ok {
-					rExpanded = v
-				}
-				r := remote
-				nodes = append(nodes, treeNode{
-					Label: remoteNodeLabel, Remote: &r, IsGroup: true, IsExpanded: rExpanded, Depth: 1,
-				})
-				if rExpanded {
-					for i := range m.remoteBranches {
-						rb := m.remoteBranches[i]
-						if strings.HasPrefix(rb.Name, remote.Name+"/") {
-							shortName := strings.TrimPrefix(rb.Name, remote.Name+"/")
-							nodes = append(nodes, treeNode{Label: shortName, Branch: &rb, Depth: 2})
-						}
+						shortName := strings.TrimPrefix(rb.Name, remote.Name+"/")
+						nodes = append(nodes, treeNode{Label: shortName, Branch: &rb, Depth: 2})
 					}
 				}
 			}
 		}
 	}
 
-	// --- Worktrees ---
-	if len(m.worktrees) > 1 {
-		wtLabel := fmt.Sprintf("Worktrees (%d)", len(m.worktrees))
-		wtExpanded := true
-		if v, ok := expandState[wtLabel]; ok {
-			wtExpanded = v
-		} else if v, ok := expandState[m.findOldLabel("Worktrees")]; ok {
-			wtExpanded = v
+	// --- Stashes ---
+	stashLabel := fmt.Sprintf("Stashes (%d)", len(m.stashes))
+	stashExpanded := len(m.stashes) > 0
+	if v, ok := expandState[stashLabel]; ok {
+		stashExpanded = v
+	} else if v, ok := expandState[m.findOldLabel("Stashes")]; ok {
+		stashExpanded = v
+	}
+	nodes = append(nodes, treeNode{Label: stashLabel, IsGroup: true, IsExpanded: stashExpanded})
+	if stashExpanded {
+		for i := range m.stashes {
+			s := m.stashes[i]
+			nodes = append(nodes, treeNode{Label: s.Message, Stash: &s, Depth: 1})
 		}
-		nodes = append(nodes, treeNode{Label: wtLabel, IsGroup: true, IsExpanded: wtExpanded})
-		if wtExpanded {
-			for i := range m.worktrees {
-				wt := m.worktrees[i]
-				label := wt.Path
-				if wt.Branch != "" {
-					label = wt.Branch + " → " + wt.Path
-				}
-				if wt.IsBare {
-					label += " (bare)"
-				}
-				nodes = append(nodes, treeNode{Label: label, Worktree: &wt, Depth: 1})
+	}
+
+	// --- Worktrees (exclude main worktree) ---
+	var extraWorktrees []git.Worktree
+	for _, wt := range m.worktrees {
+		if wt.Path != m.repoDir {
+			extraWorktrees = append(extraWorktrees, wt)
+		}
+	}
+	wtLabel := fmt.Sprintf("Worktrees (%d)", len(extraWorktrees))
+	wtExpanded := len(extraWorktrees) > 0
+	if v, ok := expandState[wtLabel]; ok {
+		wtExpanded = v
+	} else if v, ok := expandState[m.findOldLabel("Worktrees")]; ok {
+		wtExpanded = v
+	}
+	nodes = append(nodes, treeNode{Label: wtLabel, IsGroup: true, IsExpanded: wtExpanded})
+	if wtExpanded {
+		for i := range extraWorktrees {
+			wt := extraWorktrees[i]
+			label := wt.Path
+			if wt.Branch != "" {
+				label = wt.Branch + " → " + wt.Path
 			}
+			if wt.IsBare {
+				label += " (bare)"
+			}
+			nodes = append(nodes, treeNode{Label: label, Worktree: &wt, Depth: 1})
 		}
 	}
 
@@ -471,6 +576,13 @@ func (m *Model) findOldLabel(prefix string) string {
 		}
 	}
 	return ""
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // branchTrackInfo returns a short ahead/behind string for a branch.
@@ -530,6 +642,12 @@ func (m Model) View() string {
 			prefix = "Remote name: "
 		case inputAddRemoteURL:
 			prefix = fmt.Sprintf("URL for %s: ", m.remoteName)
+		case inputCreateTag:
+			if m.tagRef != "" {
+				prefix = fmt.Sprintf("Tag at %s: ", m.tagRef[:minInt(7, len(m.tagRef))])
+			} else {
+				prefix = "New tag: "
+			}
 		}
 		maxInputW := innerW - 2 - len(prefix)
 		if maxInputW < 1 {
@@ -558,6 +676,16 @@ func (m Model) View() string {
 		display = visible[:cursorInView] + "▌" + visible[cursorInView:]
 		inputLine = inputStyle.MaxWidth(innerW).Render(prefix + display)
 		contentHeight-- // take 1 line from tree
+	}
+
+	// Working changes summary
+	var changeLine string
+	if m.stagedCount > 0 || m.unstagedCount > 0 {
+		changeLine = "  " +
+			shared.StatusStagedStyle.Render(fmt.Sprintf("●%d", m.stagedCount)) + " " +
+			shared.StatusUnstagedStyle.Render(fmt.Sprintf("●%d", m.unstagedCount))
+		changeLine = lipgloss.NewStyle().MaxWidth(innerW).Width(innerW).Render(changeLine)
+		contentHeight-- // reserve line for changes
 	}
 
 	var lines []string
@@ -591,6 +719,8 @@ func (m Model) View() string {
 			}
 		} else if node.Tag != nil {
 			line = indent + shared.BranchStyle.Render("  "+node.Label)
+		} else if node.Stash != nil {
+			line = indent + shared.BranchStyle.Render("  "+node.Label)
 		} else if node.Worktree != nil {
 			line = indent + shared.BranchStyle.Render("  "+node.Label)
 		} else {
@@ -619,11 +749,14 @@ func (m Model) View() string {
 		lines[contentHeight-1] = lipgloss.NewStyle().Width(innerW).Render(shared.HelpDescStyle.Render("↓ more"))
 	}
 
-	var body string
-	if m.mode != inputNone {
-		body = inputLine + "\n" + strings.Join(lines, "\n")
-	} else {
-		body = strings.Join(lines, "\n")
+	var bodyParts []string
+	if changeLine != "" {
+		bodyParts = append(bodyParts, changeLine)
 	}
+	if m.mode != inputNone {
+		bodyParts = append(bodyParts, inputLine)
+	}
+	bodyParts = append(bodyParts, strings.Join(lines, "\n"))
+	body := strings.Join(bodyParts, "\n")
 	return style.Width(innerW).Height(innerH).Render(title + "\n" + body)
 }
