@@ -72,6 +72,14 @@ func renderFileDiff(fd FileDiff, styles RenderStyles, fileName string) []Rendere
 	}
 
 	for hi, hunk := range fd.Hunks {
+		// Add separator between hunks
+		if hi > 0 {
+			rendered = append(rendered, RenderedLine{
+				Text:    styles.LineNum.Render("  ───────────────────"),
+				HunkIdx: hi,
+				LineIdx: -1,
+			})
+		}
 		rendered = append(rendered, RenderedLine{
 			Text:       styles.HunkHeader.Render(hunk.Header),
 			IsHunkHead: true,

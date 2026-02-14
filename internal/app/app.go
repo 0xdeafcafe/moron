@@ -72,26 +72,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMsg:
-		// Route mouse events to the active panel
-		switch m.activePanel {
-		case shared.PanelBranches:
-			var cmd tea.Cmd
-			m.branches, cmd = m.branches.Update(msg)
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-		case shared.PanelWorkingCopy:
-			var cmd tea.Cmd
-			m.workingCopy, cmd = m.workingCopy.Update(msg)
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-		case shared.PanelDiff:
-			var cmd tea.Cmd
-			m.diffView, cmd = m.diffView.Update(msg)
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
+		// Only route mouse scroll to the diff panel
+		var cmd tea.Cmd
+		m.diffView, cmd = m.diffView.Update(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 		return m, tea.Batch(cmds...)
 
@@ -122,11 +107,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case shared.KeyHelp:
 				m.showHelp = true
 				return m, nil
-			case shared.KeyTab:
+			case shared.KeyTab, "right":
 				m.activePanel = (m.activePanel + 1) % 3
 				m.updateFocus()
 				return m, nil
-			case shared.KeyShiftTab:
+			case shared.KeyShiftTab, "left":
 				m.activePanel = (m.activePanel + 2) % 3
 				m.updateFocus()
 				return m, nil
@@ -259,6 +244,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusBar = "Delete branch failed: " + msg.Err.Error()
 		} else {
 			m.statusBar = "Deleted " + msg.Branch
+			cmds = append(cmds, m.refreshAll())
+		}
+
+	case shared.AddRemoteResultMsg:
+		if msg.Err != nil {
+			m.statusBar = "Add remote failed: " + msg.Err.Error()
+		} else {
+			m.statusBar = "Added remote " + msg.Name
 			cmds = append(cmds, m.refreshAll())
 		}
 
@@ -450,15 +443,16 @@ func (m Model) overlayDialog(base, overlay string) string {
 func (m Model) renderHelp() string {
 	help := []struct{ key, desc string }{
 		{"q / ctrl+c", "Quit"},
-		{"Tab / Shift+Tab", "Switch panel"},
+		{"← / → / Tab", "Switch panel"},
 		{"1 / 2 / 3", "Focus panel"},
-		{"j / k", "Navigate"},
+		{"↑ / ↓", "Navigate"},
 		{"", ""},
 		{"--- Branches ---", ""},
 		{"Enter", "Checkout branch"},
 		{"Space", "Expand/collapse group"},
 		{"n", "Create new branch"},
 		{"x", "Delete branch"},
+		{"A", "Add remote"},
 		{"p / P", "Push / Force push"},
 		{"l", "Pull from remote"},
 		{"f", "Fetch from remote"},

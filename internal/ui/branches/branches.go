@@ -21,6 +21,15 @@ type treeNode struct {
 	Depth      int
 }
 
+type inputMode int
+
+const (
+	inputNone inputMode = iota
+	inputCreateBranch
+	inputAddRemoteName
+	inputAddRemoteURL
+)
+
 // Model is the branches panel model.
 type Model struct {
 	width          int
@@ -37,10 +46,11 @@ type Model struct {
 	currentBranch  string
 	repoDir        string
 	firstBuild     bool
-	// Branch creation input
-	creating       bool
-	createInput    string
-	createCursor   int
+	// Input mode
+	mode         inputMode
+	inputText    string
+	inputCursor  int
+	remoteName   string // stored between remote name and URL steps
 }
 
 func New() Model {
@@ -48,14 +58,14 @@ func New() Model {
 }
 
 func (m *Model) SetSize(w, h int)       { m.width = w; m.height = h }
-func (m *Model) SetFocused(f bool)      { m.focused = f; if !f { m.creating = false } }
+func (m *Model) SetFocused(f bool)      { m.focused = f; if !f { m.mode = inputNone } }
 func (m *Model) SetRepoDir(dir string)  { m.repoDir = dir }
-func (m Model) IsTyping() bool          { return m.creating }
+func (m Model) IsTyping() bool          { return m.mode != inputNone }
 
 // HintKeys returns context-sensitive shortcut hints.
 func (m Model) HintKeys() string {
-	if m.creating {
-		return shared.HelpKeyStyle.Render("enter") + " create  " +
+	if m.mode != inputNone {
+		return shared.HelpKeyStyle.Render("enter") + " confirm  " +
 			shared.HelpKeyStyle.Render("esc") + " cancel"
 	}
 	return shared.HelpKeyStyle.Render("enter") + " checkout  " +
@@ -78,41 +88,30 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.rebuildTree()
 		return m, nil
 
-	case tea.MouseMsg:
-		if !m.focused || m.creating {
-			return m, nil
-		}
-		switch msg.Type {
-		case tea.MouseWheelUp:
-			if m.cursor > 0 {
-				m.cursor--
-				m.ensureVisible()
-			}
-		case tea.MouseWheelDown:
-			if m.cursor < len(m.nodes)-1 {
-				m.cursor++
-				m.ensureVisible()
-			}
-		}
-
 	case tea.KeyMsg:
 		if !m.focused {
 			return m, nil
 		}
 
-		if m.creating {
-			return m.handleCreateInput(msg)
+		if m.mode != inputNone {
+			return m.handleInput(msg)
 		}
 
 		switch msg.String() {
-		case shared.KeyJ, shared.KeyDown:
-			if m.cursor < len(m.nodes)-1 {
+		case shared.KeyDown:
+			if len(m.nodes) > 0 {
 				m.cursor++
+				if m.cursor >= len(m.nodes) {
+					m.cursor = 0
+				}
 				m.ensureVisible()
 			}
-		case shared.KeyK, shared.KeyUp:
-			if m.cursor > 0 {
+		case shared.KeyUp:
+			if len(m.nodes) > 0 {
 				m.cursor--
+				if m.cursor < 0 {
+					m.cursor = len(m.nodes) - 1
+				}
 				m.ensureVisible()
 			}
 		case shared.KeySpace:
@@ -132,9 +131,14 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				}
 			}
 		case shared.KeyNewBranch:
-			m.creating = true
-			m.createInput = ""
-			m.createCursor = 0
+			m.mode = inputCreateBranch
+			m.inputText = ""
+			m.inputCursor = 0
+			return m, nil
+		case shared.KeyAddRemote:
+			m.mode = inputAddRemoteName
+			m.inputText = ""
+			m.inputCursor = 0
 			return m, nil
 		case shared.KeyDeleteBranch:
 			if m.cursor < len(m.nodes) {
@@ -221,52 +225,76 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) handleCreateInput(msg tea.KeyMsg) (Model, tea.Cmd) {
+func (m Model) handleInput(msg tea.KeyMsg) (Model, tea.Cmd) {
 	switch msg.String() {
 	case shared.KeyEscape:
-		m.creating = false
-		m.createInput = ""
+		m.mode = inputNone
+		m.inputText = ""
 	case shared.KeyEnter:
-		name := strings.TrimSpace(m.createInput)
-		if name != "" {
-			m.creating = false
-			m.createInput = ""
+		text := strings.TrimSpace(m.inputText)
+		if text == "" {
+			return m, nil
+		}
+		switch m.mode {
+		case inputCreateBranch:
+			m.mode = inputNone
+			m.inputText = ""
 			repoDir := m.repoDir
 			return m, func() tea.Msg {
-				err := git.CreateBranch(repoDir, name)
-				return shared.CreateBranchResultMsg{Branch: name, Err: err}
+				err := git.CreateBranch(repoDir, text)
+				return shared.CreateBranchResultMsg{Branch: text, Err: err}
+			}
+		case inputAddRemoteName:
+			m.remoteName = text
+			m.mode = inputAddRemoteURL
+			m.inputText = ""
+			m.inputCursor = 0
+			return m, nil
+		case inputAddRemoteURL:
+			remoteName := m.remoteName
+			m.mode = inputNone
+			m.inputText = ""
+			m.remoteName = ""
+			repoDir := m.repoDir
+			return m, func() tea.Msg {
+				err := git.AddRemote(repoDir, remoteName, text)
+				return shared.AddRemoteResultMsg{Name: remoteName, Err: err}
 			}
 		}
 	case "backspace":
-		if m.createCursor > 0 {
-			m.createInput = m.createInput[:m.createCursor-1] + m.createInput[m.createCursor:]
-			m.createCursor--
+		if m.inputCursor > 0 {
+			m.inputText = m.inputText[:m.inputCursor-1] + m.inputText[m.inputCursor:]
+			m.inputCursor--
 		}
 	case "left":
-		if m.createCursor > 0 {
-			m.createCursor--
+		if m.inputCursor > 0 {
+			m.inputCursor--
 		}
 	case "right":
-		if m.createCursor < len(m.createInput) {
-			m.createCursor++
+		if m.inputCursor < len(m.inputText) {
+			m.inputCursor++
 		}
 	case "home", "ctrl+a":
-		m.createCursor = 0
+		m.inputCursor = 0
 	case "end", "ctrl+e":
-		m.createCursor = len(m.createInput)
+		m.inputCursor = len(m.inputText)
 	case "ctrl+u":
-		m.createInput = m.createInput[m.createCursor:]
-		m.createCursor = 0
+		m.inputText = m.inputText[m.inputCursor:]
+		m.inputCursor = 0
 	default:
 		if msg.Type == tea.KeySpace || msg.Type == tea.KeyRunes {
 			var ch string
 			if msg.Type == tea.KeySpace {
-				ch = "-" // spaces → dashes for branch names
+				if m.mode == inputCreateBranch {
+					ch = "-" // spaces → dashes for branch names
+				} else {
+					ch = " "
+				}
 			} else {
 				ch = string(msg.Runes)
 			}
-			m.createInput = m.createInput[:m.createCursor] + ch + m.createInput[m.createCursor:]
-			m.createCursor += len(ch)
+			m.inputText = m.inputText[:m.inputCursor] + ch + m.inputText[m.inputCursor:]
+			m.inputCursor += len(ch)
 		}
 	}
 	return m, nil
@@ -445,6 +473,21 @@ func (m *Model) findOldLabel(prefix string) string {
 	return ""
 }
 
+// branchTrackInfo returns a short ahead/behind string for a branch.
+func branchTrackInfo(b *git.Branch) string {
+	if b == nil || (b.Ahead == 0 && b.Behind == 0) {
+		return ""
+	}
+	var parts []string
+	if b.Ahead > 0 {
+		parts = append(parts, fmt.Sprintf("↑%d", b.Ahead))
+	}
+	if b.Behind > 0 {
+		parts = append(parts, fmt.Sprintf("↓%d", b.Behind))
+	}
+	return " " + strings.Join(parts, " ")
+}
+
 func (m Model) View() string {
 	style := shared.PanelStyle
 	titleStyle := shared.PanelTitleStyle
@@ -459,6 +502,13 @@ func (m Model) View() string {
 	titleText := "Branches"
 	if m.currentBranch != "" {
 		titleText = "● " + m.currentBranch
+		// Show ahead/behind for current branch in title
+		for i := range m.branches {
+			if m.branches[i].IsCurrent {
+				titleText += branchTrackInfo(&m.branches[i])
+				break
+			}
+		}
 	}
 	title := titleStyle.MaxWidth(innerW).Render(titleText)
 
@@ -467,17 +517,25 @@ func (m Model) View() string {
 		contentHeight = 0
 	}
 
-	// If creating a branch, reserve 1 line for the input at the top
-	var createLine string
-	if m.creating {
+	// If in input mode, reserve 1 line for the input at the top
+	var inputLine string
+	if m.mode != inputNone {
 		inputStyle := shared.CommitInputActiveStyle
-		display := m.createInput
-		prefix := "New branch: "
+		display := m.inputText
+		var prefix string
+		switch m.mode {
+		case inputCreateBranch:
+			prefix = "New branch: "
+		case inputAddRemoteName:
+			prefix = "Remote name: "
+		case inputAddRemoteURL:
+			prefix = fmt.Sprintf("URL for %s: ", m.remoteName)
+		}
 		maxInputW := innerW - 2 - len(prefix)
 		if maxInputW < 1 {
 			maxInputW = 1
 		}
-		pos := m.createCursor
+		pos := m.inputCursor
 		if pos > len(display) {
 			pos = len(display)
 		}
@@ -498,7 +556,7 @@ func (m Model) View() string {
 			cursorInView = len(visible)
 		}
 		display = visible[:cursorInView] + "▌" + visible[cursorInView:]
-		createLine = inputStyle.MaxWidth(innerW).Render(prefix + display)
+		inputLine = inputStyle.MaxWidth(innerW).Render(prefix + display)
 		contentHeight-- // take 1 line from tree
 	}
 
@@ -524,10 +582,12 @@ func (m Model) View() string {
 			}
 			line = indent + shared.BranchGroupStyle.Render(arrow+" "+node.Label)
 		} else if node.Branch != nil {
+			label := node.Label
+			track := branchTrackInfo(node.Branch)
 			if node.Branch.IsCurrent {
-				line = indent + shared.BranchCurrentStyle.Render("● "+node.Label)
+				line = indent + shared.BranchCurrentStyle.Render("● "+label) + shared.HelpDescStyle.Render(track)
 			} else {
-				line = indent + shared.BranchStyle.Render("  "+node.Label)
+				line = indent + shared.BranchStyle.Render("  "+label) + shared.HelpDescStyle.Render(track)
 			}
 		} else if node.Tag != nil {
 			line = indent + shared.BranchStyle.Render("  "+node.Label)
@@ -538,7 +598,7 @@ func (m Model) View() string {
 		}
 
 		line = lipgloss.NewStyle().MaxWidth(innerW).Render(line)
-		if i == m.cursor && m.focused && !m.creating {
+		if i == m.cursor && m.focused && m.mode == inputNone {
 			line = shared.CursorStyle.Width(innerW).Render(line)
 		} else {
 			line = lipgloss.NewStyle().Width(innerW).Render(line)
@@ -560,8 +620,8 @@ func (m Model) View() string {
 	}
 
 	var body string
-	if m.creating {
-		body = createLine + "\n" + strings.Join(lines, "\n")
+	if m.mode != inputNone {
+		body = inputLine + "\n" + strings.Join(lines, "\n")
 	} else {
 		body = strings.Join(lines, "\n")
 	}

@@ -11,8 +11,6 @@ const (
 	KeyPanel3     = "3"
 	KeyUp         = "up"
 	KeyDown       = "down"
-	KeyK          = "k"
-	KeyJ          = "j"
 	KeyEnter      = "enter"
 	KeySpace      = " "
 	KeyStage      = "s"
@@ -34,4 +32,5 @@ const (
 	KeyDeleteBranch = "x"
 	KeyPull         = "l"
 	KeyIgnore       = "i"
+	KeyAddRemote    = "A"
 )

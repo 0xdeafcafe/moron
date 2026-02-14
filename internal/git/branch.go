@@ -2,6 +2,7 @@ package git
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -11,6 +12,8 @@ type Branch struct {
 	IsCurrent bool
 	IsRemote  bool
 	Upstream  string
+	Ahead     int
+	Behind    int
 }
 
 // Tag represents a git tag.
@@ -24,11 +27,11 @@ type Remote struct {
 	URL  string
 }
 
-// ListBranches returns all local branches.
+// ListBranches returns all local branches with ahead/behind counts.
 func ListBranches(repoDir string) ([]Branch, error) {
 	result, err := Run(RunOpts{
 		Dir:  repoDir,
-		Args: []string{"branch", "--format=%(HEAD)%(refname:short)\t%(upstream:short)"},
+		Args: []string{"branch", "--format=%(HEAD)%(refname:short)\t%(upstream:short)\t%(upstream:track)"},
 	})
 	if err != nil {
 		return nil, err
@@ -43,17 +46,23 @@ func ListBranches(repoDir string) ([]Branch, error) {
 		line = strings.TrimPrefix(line, "*")
 		line = strings.TrimPrefix(line, " ")
 
-		parts := strings.SplitN(line, "\t", 2)
+		parts := strings.SplitN(line, "\t", 3)
 		name := parts[0]
 		upstream := ""
 		if len(parts) > 1 {
 			upstream = parts[1]
+		}
+		var ahead, behind int
+		if len(parts) > 2 {
+			ahead, behind = parseTrackInfo(parts[2])
 		}
 
 		branches = append(branches, Branch{
 			Name:      name,
 			IsCurrent: isCurrent,
 			Upstream:  upstream,
+			Ahead:     ahead,
+			Behind:    behind,
 		})
 	}
 
@@ -62,6 +71,25 @@ func ListBranches(repoDir string) ([]Branch, error) {
 	})
 
 	return branches, nil
+}
+
+// parseTrackInfo parses git's %(upstream:track) output like "[ahead 3, behind 2]".
+func parseTrackInfo(track string) (ahead, behind int) {
+	track = strings.TrimSpace(track)
+	if track == "" || track == "[gone]" {
+		return 0, 0
+	}
+	track = strings.TrimPrefix(track, "[")
+	track = strings.TrimSuffix(track, "]")
+	for _, part := range strings.Split(track, ",") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "ahead ") {
+			ahead, _ = strconv.Atoi(strings.TrimPrefix(part, "ahead "))
+		} else if strings.HasPrefix(part, "behind ") {
+			behind, _ = strconv.Atoi(strings.TrimPrefix(part, "behind "))
+		}
+	}
+	return
 }
 
 // ListRemoteBranches returns all remote branches.
@@ -141,6 +169,15 @@ func ListRemotes(repoDir string) ([]Remote, error) {
 	}
 
 	return remotes, nil
+}
+
+// AddRemote adds a new remote with the given name and URL.
+func AddRemote(repoDir, name, url string) error {
+	_, err := Run(RunOpts{
+		Dir:  repoDir,
+		Args: []string{"remote", "add", name, url},
+	})
+	return err
 }
 
 // Checkout switches to the given branch.

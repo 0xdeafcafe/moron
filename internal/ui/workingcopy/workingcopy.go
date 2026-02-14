@@ -104,35 +104,6 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case tea.MouseMsg:
-		if !m.focused || m.typing {
-			return m, nil
-		}
-		switch msg.Type {
-		case tea.MouseWheelUp:
-			if m.returnCursor >= 0 {
-				m.cursor = m.returnCursor
-				m.returnCursor = -1
-			} else {
-				m.cursor--
-			}
-			m.skipSeparator(-1)
-			m.clampCursor()
-			m.updateSection()
-			return m, m.emitFileSelected()
-		case tea.MouseWheelDown:
-			if m.returnCursor >= 0 {
-				m.cursor = m.returnCursor
-				m.returnCursor = -1
-			} else {
-				m.cursor++
-			}
-			m.skipSeparator(1)
-			m.clampCursor()
-			m.updateSection()
-			return m, m.emitFileSelected()
-		}
-
 	case tea.KeyMsg:
 		if !m.focused {
 			return m, nil
@@ -143,28 +114,40 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 
 		switch msg.String() {
-		case shared.KeyJ, shared.KeyDown:
-			if m.returnCursor >= 0 {
-				m.cursor = m.returnCursor
-				m.returnCursor = -1
-			} else {
-				m.cursor++
+		case shared.KeyDown:
+			total := m.totalItems()
+			if total > 0 {
+				if m.returnCursor >= 0 {
+					m.cursor = m.returnCursor
+					m.returnCursor = -1
+				} else {
+					m.cursor++
+					if m.cursor >= total {
+						m.cursor = 0
+					}
+				}
+				m.skipSeparator(1)
+				m.clampCursor()
+				m.updateSection()
+				return m, m.emitFileSelected()
 			}
-			m.skipSeparator(1)
-			m.clampCursor()
-			m.updateSection()
-			return m, m.emitFileSelected()
-		case shared.KeyK, shared.KeyUp:
-			if m.returnCursor >= 0 {
-				m.cursor = m.returnCursor
-				m.returnCursor = -1
-			} else {
-				m.cursor--
+		case shared.KeyUp:
+			total := m.totalItems()
+			if total > 0 {
+				if m.returnCursor >= 0 {
+					m.cursor = m.returnCursor
+					m.returnCursor = -1
+				} else {
+					m.cursor--
+					if m.cursor < 0 {
+						m.cursor = total - 1
+					}
+				}
+				m.skipSeparator(-1)
+				m.clampCursor()
+				m.updateSection()
+				return m, m.emitFileSelected()
 			}
-			m.skipSeparator(-1)
-			m.clampCursor()
-			m.updateSection()
-			return m, m.emitFileSelected()
 		case shared.KeySpace, shared.KeyStage:
 			m.returnCursor = m.cursor
 			return m, m.stageUnstageFile()
@@ -461,9 +444,6 @@ func (m Model) totalItems() int {
 
 func (m Model) emitFileSelected() tea.Cmd {
 	path, staged, untracked := m.SelectedFile()
-	if path == "" {
-		return nil
-	}
 	return func() tea.Msg {
 		return shared.FileSelectedMsg{Path: path, Staged: staged, Untracked: untracked}
 	}

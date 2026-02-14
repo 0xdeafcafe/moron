@@ -99,6 +99,12 @@ type DeleteBranchResultMsg struct {
 	Err    error
 }
 
+// AddRemoteResultMsg carries the result of adding a remote.
+type AddRemoteResultMsg struct {
+	Name string
+	Err  error
+}
+
 // FocusPanelMsg requests focus change to a specific panel.
 type FocusPanelMsg struct {
 	Panel Panel

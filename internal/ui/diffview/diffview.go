@@ -63,6 +63,11 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.offset = 0
 		m.lineSelect = false
 		m.selectedLines = make(map[int]bool)
+		if msg.Path == "" {
+			m.fileDiffs = nil
+			m.rendered = nil
+			return m, nil
+		}
 		return m, m.loadDiff()
 
 	case shared.DiffUpdatedMsg:
@@ -113,17 +118,23 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 
 		switch msg.String() {
-		case shared.KeyJ, shared.KeyDown:
-			if m.cursor < len(m.rendered)-1 {
+		case shared.KeyDown:
+			if len(m.rendered) > 0 {
 				m.cursor++
+				if m.cursor >= len(m.rendered) {
+					m.cursor = 0
+				}
 				m.ensureVisible()
 				if m.lineSelect {
 					m.updateSelection()
 				}
 			}
-		case shared.KeyK, shared.KeyUp:
-			if m.cursor > 0 {
+		case shared.KeyUp:
+			if len(m.rendered) > 0 {
 				m.cursor--
+				if m.cursor < 0 {
+					m.cursor = len(m.rendered) - 1
+				}
 				m.ensureVisible()
 				if m.lineSelect {
 					m.updateSelection()
