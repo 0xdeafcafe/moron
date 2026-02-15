@@ -72,14 +72,27 @@ func Log(repoDir string, limit int, ref ...string) ([]LogEntry, error) {
 }
 
 // CurrentBranch returns the name of the current branch.
-// Works even on repos with no commits by falling back to symbolic-ref.
+// If HEAD is detached, returns the short hash prefixed with "detached@".
 func CurrentBranch(repoDir string) (string, error) {
 	result, err := Run(RunOpts{
 		Dir:  repoDir,
 		Args: []string{"symbolic-ref", "--short", "HEAD"},
 	})
+	if err == nil {
+		return strings.TrimSpace(result.Stdout), nil
+	}
+	// Detached HEAD — get the short hash
+	result, err = Run(RunOpts{
+		Dir:  repoDir,
+		Args: []string{"rev-parse", "--short", "HEAD"},
+	})
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(result.Stdout), nil
+	return "detached@" + strings.TrimSpace(result.Stdout), nil
+}
+
+// IsDetachedHEAD returns true if the given branch string represents a detached HEAD.
+func IsDetachedHEAD(branch string) bool {
+	return strings.HasPrefix(branch, "detached@")
 }

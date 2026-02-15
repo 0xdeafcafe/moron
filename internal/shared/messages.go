@@ -27,6 +27,9 @@ type BackgroundFetchDoneMsg struct {
 // TickFetchMsg triggers a periodic background fetch.
 type TickFetchMsg struct{}
 
+// GitChangedMsg signals that the .git directory changed on disk.
+type GitChangedMsg struct{}
+
 // StatusUpdatedMsg carries refreshed status data.
 type StatusUpdatedMsg struct {
 	Files []git.FileStatus

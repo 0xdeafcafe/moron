@@ -206,10 +206,15 @@ func Checkout(repoDir, branch string) error {
 }
 
 // CreateBranch creates a new branch and checks it out.
-func CreateBranch(repoDir, name string) error {
+// If startPoint is non-empty, the branch is created from that ref.
+func CreateBranch(repoDir, name string, startPoint ...string) error {
+	args := []string{"checkout", "-b", name}
+	if len(startPoint) > 0 && startPoint[0] != "" {
+		args = append(args, startPoint[0])
+	}
 	_, err := Run(RunOpts{
 		Dir:  repoDir,
-		Args: []string{"checkout", "-b", name},
+		Args: args,
 	})
 	return err
 }

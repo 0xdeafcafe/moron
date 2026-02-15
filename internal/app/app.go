@@ -17,7 +17,7 @@ import (
 	"github.com/0xdeafcafe/moron/internal/ui/workingcopy"
 )
 
-const fetchInterval = 30 * time.Second
+const fetchInterval = 60 * time.Second
 
 // Model is the root application model.
 type Model struct {
@@ -32,9 +32,12 @@ type Model struct {
 	dialog      dialog.Model
 	palette     palette.Model
 
-	settings  config.Settings
-	statusBar string
-	showHelp  bool
+	settings    config.Settings
+	statusBar   string
+	showHelp    bool
+	watcherDone chan struct{}
+	watcherCh   chan struct{}
+	lastRefresh time.Time
 }
 
 // New creates a new application model.
@@ -64,6 +67,8 @@ func New(repoDir string) Model {
 		dialog:      d,
 		palette:     p,
 		settings:    s,
+		watcherDone: make(chan struct{}),
+		watcherCh:   make(chan struct{}, 1),
 	}
 }
 
@@ -73,6 +78,7 @@ func (m Model) Init() tea.Cmd {
 		m.backgroundFetch(),
 		m.refreshAll(),
 		m.scheduleFetch(),
+		m.startWatcher(),
 	)
 }
 
@@ -88,6 +94,36 @@ func (m Model) scheduleFetch() tea.Cmd {
 	return tea.Tick(fetchInterval, func(time.Time) tea.Msg {
 		return shared.TickFetchMsg{}
 	})
+}
+
+func (m Model) startWatcher() tea.Cmd {
+	repoDir := m.repoDir
+	done := m.watcherDone
+	ch := m.watcherCh
+
+	go git.WatchGitDir(repoDir, func() {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}, done)
+
+	return m.listenForGitChange()
+}
+
+func (m Model) listenForGitChange() tea.Cmd {
+	ch := m.watcherCh
+	return func() tea.Msg {
+		<-ch
+		return shared.GitChangedMsg{}
+	}
+}
+
+// StopWatcher cleans up the file watcher.
+func (m Model) StopWatcher() {
+	if m.watcherDone != nil {
+		close(m.watcherDone)
+	}
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -162,9 +198,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activePanel = shared.PanelDiff
 				return m, m.updateFocus()
 			case shared.KeyNewBranch:
+				ref := m.branches.SelectedBranch()
 				m.activePanel = shared.PanelBranches
 				m.updateFocus()
-				m.branches.StartCreateBranch()
+				m.branches.StartCreateBranch(ref)
 				return m, nil
 			case shared.KeyAddRemote:
 				m.activePanel = shared.PanelBranches
@@ -366,11 +403,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case shared.BackgroundFetchDoneMsg:
-		// Silent fetch completed — just refresh data
-		cmds = append(cmds, m.refreshAll())
+		// Silent fetch completed — watcher will pick up changes
 
 	case shared.TickFetchMsg:
 		cmds = append(cmds, m.backgroundFetch(), m.scheduleFetch())
+
+	case shared.GitChangedMsg:
+		cmds = append(cmds, m.listenForGitChange())
+		// Skip if we recently refreshed from our own action
+		if time.Since(m.lastRefresh) > 300*time.Millisecond {
+			cmds = append(cmds, m.refreshAll())
+		}
 
 	case shared.FetchResultMsg:
 		if msg.Err != nil {
@@ -536,7 +579,8 @@ func (m *Model) updateLayout() {
 	m.palette.SetSize(m.width, m.height)
 }
 
-func (m Model) refreshAll() tea.Cmd {
+func (m *Model) refreshAll() tea.Cmd {
+	m.lastRefresh = time.Now()
 	repoDir := m.repoDir
 	return tea.Batch(
 		func() tea.Msg {

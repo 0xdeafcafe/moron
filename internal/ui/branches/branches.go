@@ -2,6 +2,7 @@ package branches
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -57,6 +58,7 @@ type Model struct {
 	inputCursor  int
 	remoteName   string // stored between remote name and URL steps
 	tagRef       string // ref for tag creation (empty = HEAD)
+	branchRef    string // start point for branch creation (empty = HEAD)
 }
 
 func New() Model {
@@ -78,7 +80,7 @@ func (m Model) IsTyping() bool          { return m.mode != inputNone }
 func (m Model) CurrentBranch() string        { return m.currentBranch }
 func (m Model) AllBranches() []git.Branch    { return m.branches }
 func (m Model) AllRemoteBranches() []git.Branch { return m.remoteBranches }
-func (m *Model) StartCreateBranch() { m.mode = inputCreateBranch; m.inputText = ""; m.inputCursor = 0 }
+func (m *Model) StartCreateBranch(ref string) { m.mode = inputCreateBranch; m.inputText = ""; m.inputCursor = 0; m.branchRef = ref }
 func (m *Model) StartAddRemote()    { m.mode = inputAddRemoteName; m.inputText = ""; m.inputCursor = 0 }
 func (m *Model) StartCreateTag(ref string) { m.mode = inputCreateTag; m.inputText = ""; m.inputCursor = 0; m.tagRef = ref }
 
@@ -332,11 +334,13 @@ func (m Model) handleInput(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 		switch m.mode {
 		case inputCreateBranch:
+			ref := m.branchRef
 			m.mode = inputNone
 			m.inputText = ""
+			m.branchRef = ""
 			repoDir := m.repoDir
 			return m, func() tea.Msg {
-				err := git.CreateBranch(repoDir, text)
+				err := git.CreateBranch(repoDir, text, ref)
 				return shared.CreateBranchResultMsg{Branch: text, Err: err}
 			}
 		case inputAddRemoteName:
@@ -455,7 +459,15 @@ func (m *Model) rebuildTree() {
 			nodes = append(nodes, treeNode{Label: b.Name, Branch: &b, Depth: 1})
 		}
 
-		for prefix, brs := range groups {
+		// Sort group prefixes for stable ordering
+		groupKeys := make([]string, 0, len(groups))
+		for k := range groups {
+			groupKeys = append(groupKeys, k)
+		}
+		sort.Strings(groupKeys)
+
+		for _, prefix := range groupKeys {
+			brs := groups[prefix]
 			expanded := true
 			if v, ok := expandState[prefix+"/"]; ok {
 				expanded = v
@@ -627,7 +639,11 @@ func (m Model) View() string {
 
 	titleText := "Branches"
 	if m.currentBranch != "" {
-		titleText = "● " + m.currentBranch
+		if git.IsDetachedHEAD(m.currentBranch) {
+			titleText = "⊘ " + m.currentBranch
+		} else {
+			titleText = "● " + m.currentBranch
+		}
 		// Show ahead/behind for current branch in title
 		for i := range m.branches {
 			if m.branches[i].IsCurrent {
@@ -651,7 +667,11 @@ func (m Model) View() string {
 		var prefix string
 		switch m.mode {
 		case inputCreateBranch:
-			prefix = "New branch: "
+			if m.branchRef != "" {
+				prefix = fmt.Sprintf("Branch from %s: ", m.branchRef)
+			} else {
+				prefix = "New branch: "
+			}
 		case inputAddRemoteName:
 			prefix = "Remote name: "
 		case inputAddRemoteURL:
