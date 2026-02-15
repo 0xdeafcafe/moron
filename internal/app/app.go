@@ -182,12 +182,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case shared.KeyHelp:
 				m.showHelp = true
 				return m, nil
-			case shared.KeyTab, "right":
+			case shared.KeyTab:
 				m.activePanel = (m.activePanel + 1) % 3
 				return m, m.updateFocus()
-			case shared.KeyShiftTab, "left":
+			case shared.KeyShiftTab:
 				m.activePanel = (m.activePanel + 2) % 3
 				return m, m.updateFocus()
+			case "right":
+				if m.activePanel == shared.PanelBranches {
+					m.branches.ExpandSelected()
+				} else {
+					m.activePanel = (m.activePanel + 1) % 3
+					return m, m.updateFocus()
+				}
+			case "left":
+				if m.activePanel == shared.PanelBranches {
+					m.branches.CollapseSelected()
+				} else {
+					m.activePanel = (m.activePanel + 2) % 3
+					return m, m.updateFocus()
+				}
 			case shared.KeyPanel1:
 				m.activePanel = shared.PanelBranches
 				return m, m.updateFocus()
@@ -330,7 +344,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.refreshAll())
 
 	case shared.StatusUpdatedMsg:
-		m.workingCopy, _ = m.workingCopy.Update(msg)
+		var cmd tea.Cmd
+		m.workingCopy, cmd = m.workingCopy.Update(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		m.branches, _ = m.branches.Update(msg)
 		if msg.Err != nil {
 			m.statusBar = "Error: " + msg.Err.Error()

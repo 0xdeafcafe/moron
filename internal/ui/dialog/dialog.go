@@ -142,22 +142,5 @@ func (m Model) View() string {
 		b.WriteString(okBtn + "  " + cancelBtn)
 	}
 
-	content := shared.DialogStyle.Render(b.String())
-
-	dialogWidth := lipgloss.Width(content)
-	dialogHeight := lipgloss.Height(content)
-
-	padX := (m.width - dialogWidth) / 2
-	padY := (m.height - dialogHeight) / 2
-	if padX < 0 {
-		padX = 0
-	}
-	if padY < 0 {
-		padY = 0
-	}
-
-	return lipgloss.NewStyle().
-		MarginLeft(padX).
-		MarginTop(padY).
-		Render(content)
+	return shared.DialogStyle.Render(b.String())
 }

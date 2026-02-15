@@ -84,6 +84,34 @@ func (m *Model) StartCreateBranch(ref string) { m.mode = inputCreateBranch; m.in
 func (m *Model) StartAddRemote()    { m.mode = inputAddRemoteName; m.inputText = ""; m.inputCursor = 0 }
 func (m *Model) StartCreateTag(ref string) { m.mode = inputCreateTag; m.inputText = ""; m.inputCursor = 0; m.tagRef = ref }
 
+// ExpandSelected expands the group node under the cursor.
+func (m *Model) ExpandSelected() {
+	if m.cursor < len(m.nodes) && m.nodes[m.cursor].IsGroup && !m.nodes[m.cursor].IsExpanded {
+		m.nodes[m.cursor].IsExpanded = true
+		m.rebuildTree()
+	}
+}
+
+// CollapseSelected collapses the group node under the cursor,
+// or moves to the parent group if on a leaf node.
+func (m *Model) CollapseSelected() {
+	if m.cursor < len(m.nodes) {
+		if m.nodes[m.cursor].IsGroup && m.nodes[m.cursor].IsExpanded {
+			m.nodes[m.cursor].IsExpanded = false
+			m.rebuildTree()
+		} else if !m.nodes[m.cursor].IsGroup {
+			// Move cursor to parent group
+			for i := m.cursor - 1; i >= 0; i-- {
+				if m.nodes[i].IsGroup && m.nodes[i].Depth < m.nodes[m.cursor].Depth {
+					m.cursor = i
+					m.ensureVisible()
+					break
+				}
+			}
+		}
+	}
+}
+
 // PushRemote returns the remote name to push to for the current branch.
 // Uses the upstream remote if set, otherwise falls back to the first remote.
 func (m Model) PushRemote() string {
