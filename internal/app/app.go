@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -368,6 +369,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 
+	case shared.BranchDiffMsg:
+		var cmd tea.Cmd
+		m.diffView, cmd = m.diffView.Update(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+
+	case shared.SwitchRepoMsg:
+		if msg.Dir == "" || msg.Dir == m.repoDir {
+			return m, nil
+		}
+		m.repoDir = msg.Dir
+		m.branches.SetRepoDir(msg.Dir)
+		m.workingCopy.SetRepoDir(msg.Dir)
+		m.diffView.SetRepoDir(msg.Dir)
+		m.diffView, _ = m.diffView.Update(shared.FileSelectedMsg{Path: ""})
+		m.statusBar = "Inspecting " + msg.Dir
+		// Restart the .git watcher on the new repo. The old goroutine exits
+		// when its done channel closes; the shared event channel is reused
+		// so the pending listener keeps working.
+		close(m.watcherDone)
+		m.watcherDone = make(chan struct{})
+		done := m.watcherDone
+		ch := m.watcherCh
+		go git.WatchGitDir(msg.Dir, func() {
+			select {
+			case ch <- struct{}{}:
+			default:
+			}
+		}, done)
+		cmds = append(cmds, m.refreshAll())
+
 	case shared.DiffUpdatedMsg:
 		m.diffView, _ = m.diffView.Update(msg)
 
@@ -652,7 +685,7 @@ func (m Model) View() string {
 	if leftText == "" {
 		panelNames := []string{"branches", "working copy", "diff"}
 		activeName := panelNames[m.activePanel]
-		leftText = fmt.Sprintf(" [%s]  ?: help  q: quit", activeName)
+		leftText = fmt.Sprintf(" [%s] %s  ?: help  q: quit", activeName, filepath.Base(m.repoDir))
 	}
 
 	// Right side: context-sensitive hints
@@ -730,7 +763,8 @@ func (m Model) renderHelp() string {
 		{"ctrl+k", "Settings palette"},
 		{"", ""},
 		{"--- Branches ---", ""},
-		{"Enter", "Checkout branch"},
+		{"Enter", "Inspect branch diff / open worktree"},
+		{"c", "Checkout branch"},
 		{"Space", "Expand/collapse group"},
 		{"n", "Create new branch"},
 		{"t", "Create tag"},

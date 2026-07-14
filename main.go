@@ -4,28 +4,32 @@ import (
 	"fmt"
 	"os"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/0xdeafcafe/moron/internal/app"
-	"github.com/0xdeafcafe/moron/internal/git"
+	"github.com/0xdeafcafe/moron/tui"
 )
 
+const usage = `moron — a git client you'd be a moron for using
+
+Usage:
+  moron [dir]
+
+Opens the TUI for the repository containing dir (default: the current
+directory). Worktrees listed in the branches panel can be opened with
+Enter to inspect them without touching the filesystem.
+`
+
 func main() {
-	dir, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	dir := "."
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "-h", "--help", "help":
+			fmt.Print(usage)
+			return
+		default:
+			dir = os.Args[1]
+		}
 	}
 
-	repoDir, err := git.FindRepo(dir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	model := app.New(repoDir)
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
-
-	if _, err := p.Run(); err != nil {
+	if err := tui.Run(dir); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}

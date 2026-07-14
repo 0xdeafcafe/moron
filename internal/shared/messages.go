@@ -123,6 +123,20 @@ type BranchLogMsg struct {
 	Err    error
 }
 
+// BranchDiffMsg carries a read-only diff of a ref against HEAD
+// (merge-base three-dot diff), shown without checking the ref out.
+type BranchDiffMsg struct {
+	Ref       string
+	FileDiffs []diff.FileDiff
+	Err       error
+}
+
+// SwitchRepoMsg re-targets the whole app at another repository directory
+// (typically a linked worktree) without touching the filesystem.
+type SwitchRepoMsg struct {
+	Dir string
+}
+
 // CreateTagResultMsg carries the result of creating a tag.
 type CreateTagResultMsg struct {
 	Tag string

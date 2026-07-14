@@ -18,6 +18,7 @@ type viewMode int
 const (
 	viewDiff viewMode = iota
 	viewLog
+	viewBranchDiff
 )
 
 // Model is the diff viewer panel model.
@@ -41,6 +42,9 @@ type Model struct {
 	mode       viewMode
 	logBranch  string
 	logEntries []git.LogEntry
+	// Branch diff view (read-only inspect)
+	branchRef     string
+	branchDiffErr error
 }
 
 func New() Model {
@@ -67,6 +71,10 @@ func (m Model) HintKeys() string {
 	if m.mode == viewLog {
 		return shared.HelpKeyStyle.Render("↑↓") + " scroll  " +
 			shared.HelpKeyStyle.Render("t") + " tag"
+	}
+	if m.mode == viewBranchDiff {
+		return shared.HelpKeyStyle.Render("↑↓") + " scroll  " +
+			shared.HelpKeyStyle.Render("read-only")
 	}
 	if m.lineSelect {
 		return shared.HelpKeyStyle.Render("space") + " stage  " +
@@ -104,6 +112,26 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.logEntries = msg.Log
 		m.cursor = 0
 		m.offset = 0
+		return m, nil
+
+	case shared.BranchDiffMsg:
+		m.mode = viewBranchDiff
+		m.branchRef = msg.Ref
+		m.branchDiffErr = msg.Err
+		m.filePath = ""
+		m.logEntries = nil
+		m.logBranch = ""
+		m.cursor = 0
+		m.offset = 0
+		m.lineSelect = false
+		m.selectedLines = make(map[int]bool)
+		if msg.Err != nil {
+			m.fileDiffs = nil
+			m.rendered = nil
+			return m, nil
+		}
+		m.fileDiffs = msg.FileDiffs
+		m.rendered = renderBranchDiff(msg.FileDiffs, m.styles)
 		return m, nil
 
 	case shared.DiffUpdatedMsg:
@@ -210,11 +238,11 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				m.ensureVisible()
 			}
 		case shared.KeyNextHunk:
-			if m.mode == viewDiff {
+			if m.mode != viewLog {
 				m.jumpToNextHunk()
 			}
 		case shared.KeyPrevHunk:
-			if m.mode == viewDiff {
+			if m.mode != viewLog {
 				m.jumpToPrevHunk()
 			}
 		case shared.KeyLineSelect:
@@ -461,7 +489,14 @@ func (m Model) View() string {
 	}
 
 	titleText := "Diff"
-	if m.filePath != "" {
+	if m.mode == viewBranchDiff {
+		titleText = "HEAD…" + m.branchRef
+		if len(m.fileDiffs) > 0 {
+			titleText += fmt.Sprintf(" [%d files, read-only]", len(m.fileDiffs))
+		} else {
+			titleText += " [read-only]"
+		}
+	} else if m.filePath != "" {
 		titleText = m.filePath
 		if m.isCached {
 			titleText += " [Staged]"
@@ -488,7 +523,13 @@ func (m Model) View() string {
 	var lines []string
 
 	if len(m.rendered) == 0 {
-		if m.filePath == "" {
+		if m.mode == viewBranchDiff {
+			if m.branchDiffErr != nil {
+				lines = append(lines, shared.HelpDescStyle.Render("  Error: "+m.branchDiffErr.Error()))
+			} else {
+				lines = append(lines, shared.HelpDescStyle.Render("  No differences vs HEAD"))
+			}
+		} else if m.filePath == "" {
 			lines = append(lines, shared.HelpDescStyle.Render("  Select a file to view diff"))
 		} else {
 			lines = append(lines, shared.HelpDescStyle.Render("  No diff for "+m.filePath))
@@ -634,6 +675,31 @@ func (m Model) viewLog(style, titleStyle lipgloss.Style, innerW, innerH int) str
 
 	body := title + "\n" + strings.Join(lines, "\n")
 	return style.Width(innerW).Height(innerH).Render(body)
+}
+
+// renderBranchDiff renders every file in a ref diff, with a header line per
+// file. The result is read-only: hunk indices are per-file and must not be
+// used for staging.
+func renderBranchDiff(fileDiffs []diff.FileDiff, styles diff.RenderStyles) []diff.RenderedLine {
+	fileHeaderStyle := lipgloss.NewStyle().Foreground(shared.ColorWarning).Bold(true)
+
+	var rendered []diff.RenderedLine
+	for _, fd := range fileDiffs {
+		name := fd.NewName
+		if name == "" || name == "/dev/null" {
+			name = fd.OldName
+		}
+		if len(rendered) > 0 {
+			rendered = append(rendered, diff.RenderedLine{LineIdx: -1, HunkIdx: -1})
+		}
+		rendered = append(rendered, diff.RenderedLine{
+			Text:    fileHeaderStyle.Render("▸ " + name),
+			LineIdx: -1,
+			HunkIdx: -1,
+		})
+		rendered = append(rendered, diff.RenderFileDiffHighlighted(fd, styles, name)...)
+	}
+	return rendered
 }
 
 // styleGraph colorizes graph characters: * in bold yellow, structural chars in cyan.

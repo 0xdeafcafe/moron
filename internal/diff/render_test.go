@@ -97,17 +97,22 @@ func TestRenderFileDiffMultipleHunks(t *testing.T) {
 	styles := DefaultRenderStyles()
 	rendered := RenderFileDiff(fd, styles)
 
-	// 2 hunk headers + 4 lines = 6
-	if len(rendered) != 6 {
-		t.Fatalf("expected 6 rendered lines, got %d", len(rendered))
+	// 2 hunk headers + 4 lines + 1 separator between hunks = 7
+	if len(rendered) != 7 {
+		t.Fatalf("expected 7 rendered lines, got %d", len(rendered))
+	}
+
+	// Separator sits between the hunks and is not a header
+	if rendered[3].IsHunkHead || rendered[3].LineIdx != -1 {
+		t.Error("line 3 should be the hunk separator")
 	}
 
 	// Check second hunk header
-	if !rendered[3].IsHunkHead {
-		t.Error("line 3 should be second hunk header")
+	if !rendered[4].IsHunkHead {
+		t.Error("line 4 should be second hunk header")
 	}
-	if rendered[3].HunkIdx != 1 {
-		t.Errorf("second hunk header HunkIdx = %d, want 1", rendered[3].HunkIdx)
+	if rendered[4].HunkIdx != 1 {
+		t.Errorf("second hunk header HunkIdx = %d, want 1", rendered[4].HunkIdx)
 	}
 }
 

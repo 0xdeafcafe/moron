@@ -27,6 +27,20 @@ func Diff(repoDir string, opts DiffOptions) (string, error) {
 	return result.Stdout, nil
 }
 
+// DiffRefs returns the three-dot diff between base and ref (changes on ref
+// since its merge-base with base). Reads refs only — no checkout.
+func DiffRefs(repoDir, base, ref string) (string, error) {
+	result, err := Run(RunOpts{
+		Dir:  repoDir,
+		Args: []string{"diff", "--no-color", base + "..." + ref},
+	})
+	if err != nil {
+		return "", err
+	}
+
+	return result.Stdout, nil
+}
+
 // DiffUntracked returns the content of an untracked file formatted as a diff.
 func DiffUntracked(repoDir string, file string) (string, error) {
 	result, err := Run(RunOpts{

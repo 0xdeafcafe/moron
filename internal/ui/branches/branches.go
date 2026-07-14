@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/0xdeafcafe/moron/internal/diff"
 	"github.com/0xdeafcafe/moron/internal/git"
 	"github.com/0xdeafcafe/moron/internal/shared"
 )
@@ -135,7 +136,8 @@ func (m Model) HintKeys() string {
 		return shared.HelpKeyStyle.Render("enter") + " confirm  " +
 			shared.HelpKeyStyle.Render("esc") + " cancel"
 	}
-	return shared.HelpKeyStyle.Render("enter") + " checkout  " +
+	return shared.HelpKeyStyle.Render("enter") + " inspect  " +
+		shared.HelpKeyStyle.Render("c") + " checkout  " +
 		shared.HelpKeyStyle.Render("n") + " new  " +
 		shared.HelpKeyStyle.Render("x") + " delete"
 }
@@ -245,10 +247,23 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			if m.cursor < len(m.nodes) {
 				node := m.nodes[m.cursor]
 				if node.Branch != nil && !node.Branch.IsCurrent {
-					branch := node.Branch.Name
+					// Read-only inspect: diff the branch against HEAD
+					// without checking it out.
+					ref := node.Branch.Name
+					repoDir := m.repoDir
 					return m, func() tea.Msg {
-						err := git.Checkout(m.repoDir, branch)
-						return shared.CheckoutResultMsg{Branch: branch, Err: err}
+						raw, err := git.DiffRefs(repoDir, "HEAD", ref)
+						if err != nil {
+							return shared.BranchDiffMsg{Ref: ref, Err: err}
+						}
+						return shared.BranchDiffMsg{Ref: ref, FileDiffs: diff.Parse(raw)}
+					}
+				}
+				if node.Worktree != nil {
+					// Open the worktree in place — re-targets the app,
+					// never touches the filesystem.
+					return m, func() tea.Msg {
+						return shared.SwitchRepoMsg{Dir: node.Worktree.Path}
 					}
 				}
 				if node.Stash != nil {
@@ -270,6 +285,25 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case shared.KeyCreateTag:
 			m.StartCreateTag("")
 			return m, nil
+		case shared.KeyCommit: // "c" — checkout selected branch (confirmed)
+			if m.cursor < len(m.nodes) {
+				node := m.nodes[m.cursor]
+				if node.Branch != nil && !node.Branch.IsCurrent {
+					branch := node.Branch.Name
+					repoDir := m.repoDir
+					return m, func() tea.Msg {
+						return shared.ShowDialogMsg{
+							Type:    shared.DialogConfirm,
+							Title:   "Checkout",
+							Message: fmt.Sprintf("Switch working copy to %s?", branch),
+							OnConfirm: func() tea.Msg {
+								err := git.Checkout(repoDir, branch)
+								return shared.CheckoutResultMsg{Branch: branch, Err: err}
+							},
+						}
+					}
+				}
+			}
 		case shared.KeyDeleteBranch:
 			if m.cursor < len(m.nodes) {
 				node := m.nodes[m.cursor]
